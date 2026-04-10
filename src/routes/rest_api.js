@@ -1,0 +1,15 @@
+const express = require("express");
+const router = express.Router();
+const controller = require("../controllers/rest_api");
+router.post("/wc/orders", controller.adjustQuantity);
+router.post("/wc/keys", controller.importWcKeys);
+router.post("/wc/products/:id", controller.importProducts);
+router.post("/wc/app/import", controller.fetchAndSaveWcProducts);
+router.post("/shopify/import", controller.importShopifyProducts);
+router.get("/setup-required", controller.setupRequired);
+router.post("/setup", controller.setup);
+router.post("/shopify/auth", controller.setup);
+router.get("/settings", controller.getMetaSettings);
+router.put("/settings", controller.removeSettings);
+router.put("/settings/update", controller.updateSettings);
+module.exports = router;
