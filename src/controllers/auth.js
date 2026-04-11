@@ -46,7 +46,7 @@ exports.forgotPassword = async (req, res) => {
     });
 
     // Send reset email
-    await sendResetPasswordEmail(user, resetToken);
+    await sendResetPasswordEmail(user, resetToken, req);
 
     res.json({ message: "If an account exists, a reset email has been sent", success: true });
   } catch (error) {
@@ -107,7 +107,7 @@ exports.resetPassword = async (req, res) => {
 };
 
 // Helper function to send password reset email
-async function sendResetPasswordEmail(user, resetToken) {
+async function sendResetPasswordEmail(user, resetToken, req) {
   const themesettings = await ThemeSettings.findOne({});
   const emailTemplate = await EmailTemplate.findOne({ slug: "password_reset" });
 
@@ -115,7 +115,10 @@ async function sendResetPasswordEmail(user, resetToken) {
     throw new Error("Password reset email template not found");
   }
 
-  const resetUrl = `${themesettings.website_url}/reset-password?token=${resetToken}`;
+  // Build reset URL using the API server's own URL
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  const host = req.headers['x-forwarded-host'] || req.get('host');
+  const resetUrl = `${protocol}://${host}/reset-password?token=${resetToken}`;
   let placeholders = {
     name: user.userName || user.firstName + (user.lastName ? ` ${user.lastName}` : ''),
     reset_url: resetUrl,

@@ -32,6 +32,40 @@ app.get("/open", (req, res) => {
 
   return res.redirect("https://iconaapp.com");
 })
+
+// Password Reset Page
+app.get("/reset-password", async (req, res) => {
+  try {
+    const fs = require("fs");
+    const ThemeSettings = require("./src/models/themes");
+    const themesettings = await ThemeSettings.findOne({});
+
+    let html = fs.readFileSync(
+      path.join(__dirname, "src/views/reset-password.html"),
+      "utf8"
+    );
+
+    // Inject theme settings
+    const appName = themesettings?.app_name || themesettings?.seo_title || "App";
+    const appLogo = themesettings?.app_logo || "";
+    const primaryColor = themesettings?.primary_color
+      ? (themesettings.primary_color.startsWith("#")
+          ? themesettings.primary_color
+          : "#" + themesettings.primary_color.replace(/^FF/i, ""))
+      : "#F43F5E";
+
+    html = html
+      .replace(/\{\{app_name\}\}/g, appName)
+      .replace(/\{\{app_logo\}\}/g, appLogo)
+      .replace(/\{\{primary_color\}\}/g, primaryColor);
+
+    res.send(html);
+  } catch (error) {
+    console.error("Reset password page error:", error);
+    res.status(500).send("Something went wrong. Please try again later.");
+  }
+});
+
 /*****************
  *VIEW ENGINE CONFIG
  *****************/
