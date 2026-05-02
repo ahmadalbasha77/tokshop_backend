@@ -1607,6 +1607,19 @@ exports.updateOrderById = async (req, res) => {
     }
 
     // respond with updated orders
+    
+    // If manually marking as shipped or delivered, we need to fulfill the transaction so the seller gets paid
+    if (status === "shipped" || status === "delivered") {
+      for (const o of orders) {
+        let orderItems = await itemModel.find({ orderId: o._id });
+        await transactionModel.updateMany(
+          { itemId: { $in: orderItems.map((i) => i._id) }, type: "order", paid_out: false },
+          { $set: { order_fulfilled: true } }
+        );
+        await itemModel.updateMany({ orderId: o._id }, { $set: { status: status } });
+      }
+    }
+
     return res.status(200).json(bundleId ? orders : orders[0]);
   } catch (error) {
     console.log(error);
