@@ -143,7 +143,7 @@ exports.addAddress = async (req, res) => {
     res
       .status(422)
       .setHeader("Content-Type", "application/json")
-      .json(error.message);
+      .json({ success: false, message: error.message });
   }
 };
 
