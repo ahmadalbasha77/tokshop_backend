@@ -170,6 +170,11 @@ exports.buyLabel = async (req, res) => {
     for (const rateData of rates) {
       const { rate_id, label_file_type = "PDF", order: orderId, estimate_data } = rateData;
       if (!rate_id) continue;
+
+      if (rate_id === "LOCAL_PICKUP" || rate_id === "FREE_PICKUP") {
+        return res.status(400).json({ error: "Cannot generate a shipping label for Local Pickup orders. Please mark the order as shipped manually." });
+      }
+
       const orderData = await orderModel.findOne({ bundleId: orderId, status: { $in: ['processing', "pending_cancellation"] } }).populate("seller customer");
 
 
