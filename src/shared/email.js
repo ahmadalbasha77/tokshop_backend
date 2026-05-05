@@ -20,7 +20,7 @@ async function sendEmail(placeholders, toemail, slug, subject) {
   // console.log(settings);
   const provider = settings == null || settings == "" ? 'mailgun' : settings.default_email_provider;
 
-  if (!settings.email_from_address) {
+  if (!settings?.email_from_address) {
     throw new Error("From email address not configured");
   }
 
@@ -46,6 +46,32 @@ async function sendEmail(placeholders, toemail, slug, subject) {
       return sendWithMailgun(emailData, fromEmail, settings);
     case "brevo":
       return sendWithBrevo(emailData, fromEmail, settings);
+    default:
+      throw new Error(`Unsupported email provider: ${provider || 'not configured'}`);
+  }
+}
+
+async function sendCustomEmail(toemail, subject, html, text) {
+  let settings = await functions.getSettings();
+  const provider = settings == null || settings == "" ? 'mailgun' : settings.default_email_provider;
+
+  if (!settings?.email_from_address) {
+    throw new Error("From email address not configured");
+  }
+
+  const emailData = {
+    to: toemail,
+    subject,
+    html,
+    text,
+  };
+
+  switch (provider) {
+    case "mail_gun":
+    case "mailgun":
+      return sendWithMailgun(emailData, settings.email_from_address, settings);
+    case "brevo":
+      return sendWithBrevo(emailData, settings.email_from_address, settings);
     default:
       throw new Error(`Unsupported email provider: ${provider || 'not configured'}`);
   }
@@ -122,4 +148,4 @@ async function sendWithBrevo(emailData, fromEmail, settings) {
   }
 }
 
-module.exports = { sendEmail };
+module.exports = { sendEmail, sendCustomEmail };

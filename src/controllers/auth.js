@@ -10,10 +10,117 @@ require("dotenv").config({ path: `${__dirname}/../../.env` });
 const ThemeSettings = require("../models/themes");
 const crypto = require('crypto');
 const ResetToken = require('../models/reset_tokens');
-const { sendEmail } = require('../shared/email');
+const { sendEmail, sendCustomEmail } = require('../shared/email');
 const EmailTemplate = require('../models/templates');
 const ReferralLog = require('../models/referral_log');
 const roomsModel = require("../models/room");
+const PendingRegistration = require("../models/pending_registration");
+const OtpRateLimit = require("../models/otp_rate_limit");
+
+const OTP_EXPIRY_MINUTES = 10;
+const OTP_COOLDOWN_SECONDS = 60;
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_MAX_SENDS_PER_HOUR = 5;
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function isValidEmail(email) {
+  return /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,})+$/.test(email);
+}
+
+function getClientIp(req) {
+  const forwardedFor = req.headers["x-forwarded-for"];
+  if (forwardedFor) {
+    return forwardedFor.split(",")[0].trim();
+  }
+  return req.ip || req.connection?.remoteAddress || req.socket?.remoteAddress || "";
+}
+
+function generateOtp() {
+  return String(crypto.randomInt(100000, 1000000));
+}
+
+async function consumeOtpRateLimit(type, value) {
+  if (!value) {
+    return { allowed: true };
+  }
+
+  const now = new Date();
+  const windowMs = 60 * 60 * 1000;
+  const key = `${type}:${value}`;
+  const existing = await OtpRateLimit.findOne({ key });
+
+  if (!existing || existing.window_start.getTime() <= now.getTime() - windowMs) {
+    await OtpRateLimit.findOneAndUpdate(
+      { key },
+      {
+        $set: {
+          count: 1,
+          window_start: now,
+          expires_at: new Date(now.getTime() + windowMs),
+        },
+      },
+      { upsert: true, new: true }
+    );
+    return { allowed: true };
+  }
+
+  if (existing.count >= OTP_MAX_SENDS_PER_HOUR) {
+    const retryAfter = Math.max(
+      1,
+      Math.ceil((existing.window_start.getTime() + windowMs - now.getTime()) / 1000)
+    );
+    return { allowed: false, retry_after: retryAfter };
+  }
+
+  await OtpRateLimit.updateOne(
+    { key },
+    {
+      $inc: { count: 1 },
+      $set: { expires_at: new Date(existing.window_start.getTime() + windowMs) },
+    }
+  );
+
+  return { allowed: true };
+}
+
+async function sendVerificationEmail(email, firstName, code) {
+  const placeholders = {
+    name: firstName || "there",
+    code,
+    expiry_time: `${OTP_EXPIRY_MINUTES} minutes`,
+  };
+
+  try {
+    await sendEmail(placeholders, email, "email_verification", "Your verification code");
+    return;
+  } catch (error) {
+    if (!/Email template not found/i.test(error.message || "")) {
+      throw error;
+    }
+  }
+
+  const settings = await functions.getSettings();
+  const appName = settings?.app_name || settings?.seo_title || "Tokshop";
+  const primaryColor = settings?.primary_color
+    ? (settings.primary_color.startsWith("#") ? settings.primary_color : "#" + settings.primary_color.replace(/^FF/i, ""))
+    : "#111827";
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111827;max-width:560px;margin:0 auto;padding:24px">
+      <h2 style="margin:0 0 16px">${appName}</h2>
+      <p>Your verification code is:</p>
+      <div style="font-size:32px;font-weight:700;letter-spacing:6px;color:${primaryColor};margin:24px 0">${code}</div>
+      <p>This code expires in ${OTP_EXPIRY_MINUTES} minutes.</p>
+      <p style="color:#6b7280">If you did not request this, you can ignore this email.</p>
+    </div>
+  `;
+  const text = `Your verification code is: ${code}\n\nThis code expires in ${OTP_EXPIRY_MINUTES} minutes.\nIf you did not request this, you can ignore this email.`;
+
+  await sendCustomEmail(email, "Your verification code", html, text);
+}
 // Request password reset
 exports.forgotPassword = async (req, res) => {
   try {
@@ -312,90 +419,170 @@ async function createStripeCustomer(user, req, res) {
   }
 }
 
-exports.signupWithEmail = async (req, res) => {
-  const { email, password, firstName, lastName, country, } = req.body;
+async function createVerifiedEmailUser(pending, req, res) {
+  const registrationData = {
+    ...pending.registration_data,
+    email: pending.email,
+    firstName: pending.firstName,
+    lastName: pending.lastName || "",
+    account_type: pending.account_type || "email_password",
+  };
+
+  let validReferral = false;
+  const { referredBy, clientIp } = registrationData;
+  if (referredBy && clientIp) {
+    const existingReferral = await ReferralLog.findOne({ ip: clientIp });
+    if (!existingReferral) {
+      validReferral = true;
+    }
+  }
+
+  const settings = await functions.getSettings();
+  const autoapprove = settings?.demoMode == true || settings?.seller_auto_approve == true;
+  const user = await userModel.create({
+    ...registrationData,
+    password: pending.password_hash,
+    seller: autoapprove,
+    applied_seller: autoapprove,
+    referredBy: validReferral ? referredBy : undefined,
+    emailVerified: true,
+    email_verified: true,
+    email_verified_at: new Date(),
+  });
+
+  await createReferalLog(validReferral, referredBy, user, clientIp);
+
+  if (settings?.demoMode == true) {
+    try {
+      await sendEmail(
+        { name: user.firstName + (user.lastName ? ` ${user.lastName}` : "") },
+        user.email,
+        "promotion",
+        "Check Out Tokshop All Features"
+      );
+    } catch (error) {
+      console.error("Promotion email failed:", error);
+    }
+  }
+
+  const tokenResponse = await generateAuthTokens(user, true);
+  await createStripeCustomer(user, req, res);
+  return tokenResponse;
+}
+
+exports.requestEmailVerification = async (req, res) => {
+  const { password, firstName } = req.body;
+  const email = normalizeEmail(req.body.email);
+  const accountType = req.body.account_type || "email_password";
+
   try {
-
-    // Check if user already exists
-    let existingUser = await userModel.findOne({ email: email });
-    if (existingUser) {
-      return res.status(400).json({
-        message: "User with that email already exists",
-        success: false,
-      });
+    if (!firstName || !String(firstName).trim()) {
+      return res.status(400).json({ success: false, message: "First name is required" });
     }
 
-    let validReferral = false;
-    const { referredBy, clientIp } = req.body;
-    if (referredBy && clientIp) {
-      // Check if this IP already used a referral
-      const existingReferral = await ReferralLog.findOne({ ip: clientIp });
-      if (!existingReferral) {
-        validReferral = true;
-      }
+    if (!email || !isValidEmail(email)) {
+      return res.status(400).json({ success: false, message: "Valid email is required" });
     }
 
-    // Hash password
-    const saltRounds = 10;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
-    let userid = new mongoose.Types.ObjectId();
-
-
-    // Create Firebase user with MongoDB ID as UID
-    let respose = await admin.auth().createUser({
-      uid: userid.toString(), // MongoDB ID as Firebase UID
-      email: email,
-      password: password, // Firebase needs unhashed password
-      displayName: firstName + (lastName ? ` ${lastName}` : ''),
-      emailVerified: false,
-      account_type: "email_password"
-    });
-    // Create user in MongoDB
-    var response = await functions.getSettings();
-    var autoapprove = response["demoMode"] == true || response["seller_auto_approve"] == true;
-    console.log("autoapprove ", autoapprove)
-    const user = await userModel.create({
-      ...req.body,
-      password: hashedPassword,
-      _id: userid,
-      seller: autoapprove,
-      applied_seller: autoapprove, referredBy: validReferral ? referredBy : undefined
-    });
-    await createReferalLog(validReferral, referredBy, user, clientIp);
-    if (response["demoMode"] == true) {
-      await sendEmail({ name: firstName + (lastName ? ` ${lastName}` : '') }, email, 'promotion', "Check Out Tokshop All Features");
-    }
-
-
-    // Generate tokens
-    const tokenResponse = await generateAuthTokens(user, true);
-
-    // Create Stripe customer
-    await createStripeCustomer(user, req, res);
-
-    return res.json(tokenResponse);
-
-  } catch (error) {
-    console.error("❌ Error creating user:", error);
-
-    // Handle Firebase Auth errors
-    if (error.code === "auth/invalid-password") {
+    if (!password || String(password).length < 6) {
       return res.status(400).json({
         success: false,
         message: "The password must be at least 6 characters long.",
       });
-    } else if (error.code === "auth/email-already-exists") {
+    }
+
+    let existingUser = await userModel.findOne({ email });
+    if (existingUser) {
       return res.status(400).json({
         success: false,
-        message: "This email is already in use.",
-      });
-    } else if (error.code === "auth/invalid-email") {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid email format.",
+        message: "Email already registered",
       });
     }
 
+    const pending = await PendingRegistration.findOne({ email }).lean();
+    if (pending?.last_sent_at) {
+      const secondsSinceLastSend = Math.floor((Date.now() - pending.last_sent_at.getTime()) / 1000);
+      if (secondsSinceLastSend < OTP_COOLDOWN_SECONDS) {
+        return res.status(429).json({
+          success: false,
+          message: "Please wait before requesting another code",
+          retry_after: OTP_COOLDOWN_SECONDS - secondsSinceLastSend,
+        });
+      }
+    }
+
+    const emailRateLimit = await consumeOtpRateLimit("email", email);
+    if (!emailRateLimit.allowed) {
+      return res.status(429).json({
+        success: false,
+        message: "Too many verification code requests. Please try again later.",
+        retry_after: emailRateLimit.retry_after,
+      });
+    }
+
+    const ipRateLimit = await consumeOtpRateLimit("ip", getClientIp(req));
+    if (!ipRateLimit.allowed) {
+      return res.status(429).json({
+        success: false,
+        message: "Too many verification code requests. Please try again later.",
+        retry_after: ipRateLimit.retry_after,
+      });
+    }
+
+    const otp = generateOtp();
+    const codeHash = await bcrypt.hash(otp, 10);
+    const passwordHash = await bcrypt.hash(password, 10);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + OTP_EXPIRY_MINUTES * 60 * 1000);
+    const registrationData = {
+      ...req.body,
+      email,
+      account_type: accountType,
+      clientIp: req.body.clientIp || getClientIp(req),
+    };
+    delete registrationData.password;
+
+    await PendingRegistration.findOneAndUpdate(
+      { email },
+      {
+        $set: {
+          firstName: String(firstName).trim(),
+          lastName: req.body.lastName || "",
+          email,
+          password_hash: passwordHash,
+          account_type: accountType,
+          code_hash: codeHash,
+          attempts: 0,
+          last_sent_at: now,
+          expires_at: expiresAt,
+          registration_data: registrationData,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    try {
+      await sendVerificationEmail(email, firstName, otp);
+    } catch (error) {
+      if (pending) {
+        await PendingRegistration.replaceOne({ _id: pending._id }, pending);
+      } else {
+        await PendingRegistration.deleteOne({ email });
+      }
+      console.error("Verification email failed:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Unable to send verification email",
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Verification code sent",
+    });
+
+  } catch (error) {
+    console.error("Request email verification error:", error);
     return res.status(500).json({
       success: false,
       message: "An unexpected error occurred.",
@@ -404,11 +591,169 @@ exports.signupWithEmail = async (req, res) => {
   }
 };
 
+exports.resendEmailCode = async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  try {
+    if (!email || !isValidEmail(email)) {
+      return res.status(400).json({ success: false, message: "Valid email is required" });
+    }
+
+    const pending = await PendingRegistration.findOne({ email });
+    if (!pending) {
+      return res.status(400).json({
+        success: false,
+        message: "Verification session expired. Please register again.",
+      });
+    }
+
+    if (pending.last_sent_at) {
+      const secondsSinceLastSend = Math.floor((Date.now() - pending.last_sent_at.getTime()) / 1000);
+      if (secondsSinceLastSend < OTP_COOLDOWN_SECONDS) {
+        return res.status(429).json({
+          success: false,
+          message: "Please wait before requesting another code",
+          retry_after: OTP_COOLDOWN_SECONDS - secondsSinceLastSend,
+        });
+      }
+    }
+
+    const emailRateLimit = await consumeOtpRateLimit("email", email);
+    const ipRateLimit = await consumeOtpRateLimit("ip", getClientIp(req));
+    if (!emailRateLimit.allowed || !ipRateLimit.allowed) {
+      return res.status(429).json({
+        success: false,
+        message: "Too many verification code requests. Please try again later.",
+        retry_after: emailRateLimit.retry_after || ipRateLimit.retry_after,
+      });
+    }
+
+    const otp = generateOtp();
+    const codeHash = await bcrypt.hash(otp, 10);
+    const now = new Date();
+    const previousPendingState = {
+      code_hash: pending.code_hash,
+      attempts: pending.attempts,
+      last_sent_at: pending.last_sent_at,
+      expires_at: pending.expires_at,
+    };
+    pending.code_hash = codeHash;
+    pending.attempts = 0;
+    pending.last_sent_at = now;
+    pending.expires_at = new Date(now.getTime() + OTP_EXPIRY_MINUTES * 60 * 1000);
+    await pending.save();
+
+    try {
+      await sendVerificationEmail(email, pending.firstName, otp);
+    } catch (error) {
+      pending.code_hash = previousPendingState.code_hash;
+      pending.attempts = previousPendingState.attempts;
+      pending.last_sent_at = previousPendingState.last_sent_at;
+      pending.expires_at = previousPendingState.expires_at;
+      await pending.save();
+      console.error("Verification email resend failed:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Unable to send verification email",
+      });
+    }
+
+    return res.json({ success: true, message: "Verification code resent" });
+  } catch (error) {
+    console.error("Resend email code error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "An unexpected error occurred.",
+      error: error.message,
+    });
+  }
+};
+
+exports.verifyEmailCode = async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  const code = String(req.body.code || "").trim();
+
+  try {
+    if (!email || !isValidEmail(email)) {
+      return res.status(400).json({ success: false, message: "Valid email is required" });
+    }
+
+    if (!/^\d{6}$/.test(code)) {
+      return res.status(400).json({ success: false, message: "Verification code must be 6 digits" });
+    }
+
+    const pending = await PendingRegistration.findOne({ email });
+    if (!pending) {
+      return res.status(400).json({
+        success: false,
+        message: "Verification session expired. Please register again.",
+      });
+    }
+
+    if (pending.expires_at.getTime() < Date.now()) {
+      await PendingRegistration.deleteOne({ _id: pending._id });
+      return res.status(400).json({
+        success: false,
+        message: "Verification code expired",
+      });
+    }
+
+    if (pending.attempts >= OTP_MAX_ATTEMPTS) {
+      return res.status(429).json({
+        success: false,
+        message: "Too many attempts. Please request a new code.",
+      });
+    }
+
+    const isCodeValid = await bcrypt.compare(code, pending.code_hash);
+    if (!isCodeValid) {
+      pending.attempts += 1;
+      await pending.save();
+      return res.status(400).json({
+        success: false,
+        message: "Invalid verification code",
+      });
+    }
+
+    const existingUser = await userModel.findOne({ email });
+    if (existingUser) {
+      await PendingRegistration.deleteOne({ _id: pending._id });
+      return res.status(400).json({
+        success: false,
+        message: "Email already registered",
+      });
+    }
+
+    const tokenResponse = await createVerifiedEmailUser(pending, req, res);
+    await PendingRegistration.deleteOne({ _id: pending._id });
+    return res.json({
+      ...tokenResponse,
+      message: "Account created successfully",
+    });
+  } catch (error) {
+    console.error("Verify email code error:", error);
+    if (error.code === 11000) {
+      await PendingRegistration.deleteOne({ email });
+      return res.status(400).json({
+        success: false,
+        message: "Email already registered",
+      });
+    }
+    return res.status(500).json({
+      success: false,
+      message: "An unexpected error occurred.",
+      error: error.message,
+    });
+  }
+};
+
+exports.signupWithEmail = exports.requestEmailVerification;
+
 /**
  * Login with email/password
  */
 exports.loginWithEmail = async (req, res) => {
-  const { email, password } = req.body;
+  const { password } = req.body;
+  const email = normalizeEmail(req.body.email);
   try {
 
     // Find user in MongoDB
@@ -466,11 +811,11 @@ exports.authenticate = async (req, res) => {
           message: "Google email not verified",
         });
       }
-      email = googleUser.email;
+      email = normalizeEmail(googleUser.email);
     }
     if (type === "apple") {
       const appleUser = await verifyAppleAccessToken(providerToken);
-      email = appleUser.email;
+      email = normalizeEmail(appleUser.email);
     }
     if (email == '') {
       return res.status(401).json({
@@ -517,6 +862,8 @@ exports.authenticate = async (req, res) => {
         userName: userName || '',
         account_type: type,
         emailVerified: true,
+        email_verified: true,
+        email_verified_at: new Date(),
         seller: autoapprove,
         applied_seller: autoapprove, referredBy: validReferral ? referredBy : undefined
       });

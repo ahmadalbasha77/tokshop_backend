@@ -122,6 +122,18 @@ const user = new Schema(
       type: String,
       default: null,
     },
+    emailVerified: {
+      type: Boolean,
+      default: false,
+    },
+    email_verified: {
+      type: Boolean,
+      default: false,
+    },
+    email_verified_at: {
+      type: Date,
+      default: null,
+    },
     fcmToken: {
       type: String,
       default: null,
