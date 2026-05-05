@@ -44,9 +44,13 @@ router.post(
           }
 
       if (event.event === "egress_ended") {
-        const fileResult = event.egressInfo.fileResults?.[0];
+        console.log("🔥 Webhook egress_ended received!");
+        console.log("egressInfo:", JSON.stringify(event.egressInfo, null, 2));
+        
+        const fileResult = event.egressInfo.fileResults?.[0] || event.egressInfo.file;
 
         if (fileResult) {
+          console.log("🔥 Found fileResult:", fileResult.filename);
           const clip = await createWinnerClip(fileResult.filename, 15);
 
           // Update any items that have this egressId
@@ -60,12 +64,14 @@ router.post(
             { egressId: event.egressInfo.egressId },
             { $set: { videoReceipt: clip.clipUrl } }
           );
+        } else {
+          console.log("❌ No fileResult found in egressInfo!");
         }
       }
 
       res.sendStatus(200);
     } catch (err) {
-      // console.error("Webhook error:", err);
+      console.error("Webhook error:", err);
       res.status(401).json({ error: "Invalid webhook signature" });
     }
   }
