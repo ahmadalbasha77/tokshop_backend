@@ -188,17 +188,14 @@ router.post("/stop/record", async (req, res) => {
 //         createWinnerClip(filename, 15)
 //           .then(async (clip) => {
 //             console.log(`✅ Winner clip ready: ${clip.clipUrl}`);
-//             let item = await itemModel.findOne({egressId: egressInfo.egressId});
-//             if(item){
-//               item.videoReceipt = clip.clipUrl;
-//               item.save();
-//             }else{
-//               await auctionModel.findOneAndUpdate({
-//                 egressId: egressInfo.egressId
-//               }, {
-//                 videoReceipt: clip.clipUrl,
-//               });
-//             }
+//             await itemModel.updateMany(
+//               { egressId: egressInfo.egressId },
+//               { $set: { videoReceipt: clip.clipUrl } }
+//             );
+//             await auctionModel.updateMany(
+//               { egressId: egressInfo.egressId }, 
+//               { $set: { videoReceipt: clip.clipUrl } }
+//             );
 //           })
 //           .catch(err => {
 //             console.error('❌ Failed to create winner clip:', err);

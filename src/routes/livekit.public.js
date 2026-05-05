@@ -49,19 +49,17 @@ router.post(
         if (fileResult) {
           const clip = await createWinnerClip(fileResult.filename, 15);
 
-          let item = await itemModel.findOne({
-            egressId: event.egressInfo.egressId,
-          });
+          // Update any items that have this egressId
+          await itemModel.updateMany(
+            { egressId: event.egressInfo.egressId },
+            { $set: { videoReceipt: clip.clipUrl } }
+          );
 
-          if (item) {
-            item.videoReceipt = clip.clipUrl;
-            await item.save();
-          } else {
-            await auctionModel.findOneAndUpdate(
-              { egressId: event.egressInfo.egressId },
-              { videoReceipt: clip.clipUrl }
-            );
-          }
+          // Update the auction so that future items created get the receipt
+          await auctionModel.updateMany(
+            { egressId: event.egressInfo.egressId },
+            { $set: { videoReceipt: clip.clipUrl } }
+          );
         }
       }
 
