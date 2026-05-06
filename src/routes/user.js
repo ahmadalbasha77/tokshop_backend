@@ -25,6 +25,14 @@ userRouter
 userRouter.post("/", upload.single("profilePicture"), userController.addUser);
 
 userRouter
+  .route("/seller/application")
+  .post(userController.submitSellerApplication);
+
+userRouter
+  .route("/seller/application/:id")
+  .post(userController.submitSellerApplication);
+
+userRouter
   .route("/:userId")
   .get(
     // passport.authenticate("jwt", { session: false }),

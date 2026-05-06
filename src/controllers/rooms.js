@@ -4,6 +4,7 @@ var auctionModel = require("../models/auction");
 
 const functions = require("../shared/functions");
 require("dotenv").config({ path: ".env" });
+const { requireSellerProfileCompleteByUserId } = require("../shared/sellerProfile");
 
 var mongoose = require("mongoose");
 const products = require("../models/product");
@@ -80,6 +81,8 @@ exports.bulkUpdate = async (req, res) => {
 exports.createShow = async (req, res) => {
   try {
     console.log("createShow ", req.body);
+    const sellerProfile = await requireSellerProfileCompleteByUserId(res, req.body.userId);
+    if (!sellerProfile.ok) return;
 
     // 1️⃣ Generate first room ID
     const mainId = new mongoose.Types.ObjectId();

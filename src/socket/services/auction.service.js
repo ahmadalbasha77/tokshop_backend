@@ -2,11 +2,33 @@ const auctionModel = require("../../models/auction");
 const productModel = require("../../models/product");
 const bidModel = require("../../models/bid");
 const roomsModel = require("../../models/room");
+const userModel = require("../../models/user");
 const { getAuctionPopulateOptions, startRunningTimer } = require("../../shared/functions");
 const { startRecording } = require("../../shared/livekit");
+const { checkSellerProfileComplete, incompleteProfileResponse } = require("../../shared/sellerProfile");
 
 async function startAuction(io, socket, data) {
     const { roomId, auction, increaseBidBy } = data;
+    let ownerId = auction?.product?.ownerId;
+    if (!ownerId && auction?.product) {
+        const product = await productModel.findById(auction.product).select("ownerId");
+        ownerId = product?.ownerId;
+    }
+    const seller = ownerId
+        ? await userModel.findById(ownerId).select("seller seller_application stripe_account")
+        : null;
+    if (!seller || !seller.seller || (seller?.seller_application?.status && seller.seller_application.status !== "approved")) {
+        socket.emit("auction-error", {
+            code: "SELLER_NOT_APPROVED",
+            message: "Seller approval is required before continuing.",
+        });
+        return;
+    }
+    const profileStatus = checkSellerProfileComplete(seller);
+    if (!profileStatus.complete) {
+        socket.emit("auction-error", incompleteProfileResponse(profileStatus.missing_fields));
+        return;
+    }
     const populateOptions = await getAuctionPopulateOptions();
 
     const duration = auction.duration || 60;

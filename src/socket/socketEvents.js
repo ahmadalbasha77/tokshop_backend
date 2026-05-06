@@ -4,6 +4,7 @@
 const roomsModel = require("../models/room");
 const auctionModel = require("../models/auction");
 const productModel = require("../models/product");
+const userModel = require("../models/user");
 const giveAway = require("../models/giveaway");
 const bidModel = require("../models/bid");
 const socketEmitter = require("../shared/socketEmitter");
@@ -16,6 +17,7 @@ const {
   auctionTimers,createGiveawaOrder
 } = require("../shared/functions");
 const { startRecording } = require("../shared/livekit");
+const { checkSellerProfileComplete, incompleteProfileResponse } = require("../shared/sellerProfile");
 
 
 const registerUserHandlers = require("./handlers/user.handlers");
@@ -40,7 +42,7 @@ module.exports = (io) => {
     registerRoomHandlers(io, socket);
 
 
- 
+
     socket.on('join-scheduled-auction', async (data) => { 
       console.log("join-scheduled-auction", data);
       let { auction, userId, userName} = data;
@@ -169,6 +171,24 @@ module.exports = (io) => {
           auction,
         });
         let { baseprice,product,tokshow } = auction;
+        let ownerId = product?.ownerId;
+        if (!ownerId && product) {
+          const productDoc = await productModel.findById(product).select("ownerId");
+          ownerId = productDoc?.ownerId;
+        }
+        const seller = ownerId
+          ? await userModel.findById(ownerId).select("seller seller_application stripe_account")
+          : null;
+        if (!seller || !seller.seller || (seller?.seller_application?.status && seller.seller_application.status !== "approved")) {
+          return socket.emit("auction-error", {
+            code: "SELLER_NOT_APPROVED",
+            message: "Seller approval is required before continuing.",
+          });
+        }
+        const profileStatus = checkSellerProfileComplete(seller);
+        if (!profileStatus.complete) {
+          return socket.emit("auction-error", incompleteProfileResponse(profileStatus.missing_fields));
+        }
         const populateOptions = await getAuctionPopulateOptions();
         const duration = auction.duration || 60; 
         const endTime = Date.now() + duration * 1000; 
@@ -749,4 +769,3 @@ module.exports = (io) => {
 
   });
 };
- 

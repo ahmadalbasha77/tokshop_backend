@@ -3,6 +3,7 @@ const bidModel = require("../models/bid");
 const product = require("../models/product");
 var auctionModel = require("../models/auction");
 const { getAuctionPopulateOptions, bid } = require("../shared/functions");
+const { requireSellerProfileCompleteByUserId } = require("../shared/sellerProfile");
 
 exports.getAuctions = async (req, res, next) => {
   let { tokshow, status, page = 1, limit = 15 } = req.query;
@@ -34,6 +35,10 @@ exports.getAuctions = async (req, res, next) => {
 };
 
 exports.createAuction = async (req, res, next) => {
+  const auctionProduct = await product.findById(req.body.product).select("ownerId");
+  const sellerProfile = await requireSellerProfileCompleteByUserId(res, auctionProduct?.ownerId);
+  if (!sellerProfile.ok) return;
+
   let auctionresponse = await auctionModel.create(req.body);
   await roomsModel.findByIdAndUpdate(
     req.body.tokshow,

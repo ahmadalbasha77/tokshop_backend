@@ -8,6 +8,10 @@ const { DEFAULTS } = require("../../utils");
 const { parsePhoneNumberFromString } = require("libphonenumber-js");
 const transactionModel = require("../models/transaction");
 const { sendEmail } = require("../shared/email");
+const {
+  checkSellerProfileComplete,
+  sendIncompleteProfileResponse,
+} = require("../shared/sellerProfile");
 
 var mongoose = require("mongoose");
 
@@ -320,6 +324,10 @@ exports.getStripeBankAccount = async (req, res) => {
     if (payoutdata == null) {
       return res.json({ banks: [], status: false });
     }
+    const profileStatus = checkSellerProfileComplete(payoutdata);
+    if (!profileStatus.complete) {
+      return sendIncompleteProfileResponse(res, profileStatus.missing_fields);
+    }
     const account = await stripe.accounts.retrieve(
       payoutdata["stripe_account"]
     );
@@ -351,6 +359,15 @@ exports.stripeTransfer = async (req, res) => {
       response: "User is required",
       status: false,
     });
+  }
+
+  let payoutdata = await userModel.findById(user);
+  if (!payoutdata) {
+    return res.status(404).json({ success: false, message: "User not found" });
+  }
+  const profileStatus = checkSellerProfileComplete(payoutdata);
+  if (!profileStatus.complete) {
+    return sendIncompleteProfileResponse(res, profileStatus.missing_fields);
   }
 
   const todayStart = new Date("2026-02-26T00:00:00.000Z").getTime();
@@ -385,7 +402,6 @@ exports.stripeTransfer = async (req, res) => {
   }
   let originalAmount = Number(req.body.amount.toFixed(2)); //1458.85
   console.log(originalAmount);
-  let payoutdata = await userModel.findById(user);
 
 
 
@@ -513,6 +529,13 @@ exports.stripeTransfer = async (req, res) => {
 exports.stripePayoutPayments = async (req, res) => {
   console.log(req.body);
   let payoutdata = await userModel.findById(req.params.userId);
+  if (!payoutdata) {
+    return res.status(404).json({ success: false, message: "User not found" });
+  }
+  const profileStatus = checkSellerProfileComplete(payoutdata);
+  if (!profileStatus.complete) {
+    return sendIncompleteProfileResponse(res, profileStatus.missing_fields);
+  }
   let stripe_account = payoutdata["stripe_account"];
   console.log(stripe_account);
   // return res.json({ banks: [], status: false });
@@ -683,6 +706,17 @@ exports.connect = async (req, res) => {
     year, countryCode, applying, create_address, iban = null, url = 'https://iconaapp.com', mcc = '5999'
   } = req.body;
   console.log(req.body);
+  const user = await userModel.findById(req.params.id).select("seller seller_application");
+  if (!user) {
+    return res.status(404).json({ success: false, message: "User not found" });
+  }
+  if (!user.seller && user?.seller_application?.status !== "approved") {
+    return res.status(403).json({
+      success: false,
+      code: "SELLER_NOT_APPROVED",
+      message: "Seller approval is required before completing payout setup.",
+    });
+  }
   // if (create_address == true) {
   const phoneNumber = parsePhoneNumberFromString(phone, countryCode);
 
@@ -1024,7 +1058,11 @@ exports.payoutTransactions = async (req, res) => {
     const stripe = require("stripe")(response["stripeSecretKey"]);
     let user = await userModel.findById(req.params.userId);
     if (!user?.stripe_account) {
-      return res.status(404).json({ error: "User not found" });
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      const profileStatus = checkSellerProfileComplete(user);
+      return sendIncompleteProfileResponse(res, profileStatus.missing_fields);
     }
     console.log(user?.stripe_account);
     const payout = await stripe.payouts.list(

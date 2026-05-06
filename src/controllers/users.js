@@ -16,6 +16,7 @@ var payouthodModel = require("../models/payout_methods");
 var reviewModel = require("../models/userreview");
 var mongoose = require("mongoose");
 const bank = require("../models/bank");
+const addressModel = require("../models/address");
 const { createTestStripeToken } = require("./stripe");
 const { sendEmail } = require("../shared/email");
 const ReferralLog = require("../models/referral_log");
@@ -236,18 +237,175 @@ exports.pendingUserPayouts = async (req, res) => {
   res.json({ total });
 };
 
+exports.submitSellerApplication = async (req, res) => {
+  try {
+    const userId = req.params.id || req.body.userId || req.user?._id;
+    if (!userId) {
+      return res.status(400).json({ success: false, message: "User ID is required" });
+    }
+
+    const {
+      seller_guidelines_accepted,
+      address_line_1,
+      address_line_2 = "",
+      city,
+      country,
+      postal_code,
+      instagram_link = "",
+      tiktok_link = "",
+      facebook_link = "",
+      website_link = "",
+      has_livestream_experience = null,
+      referral_source = "",
+    } = req.body;
+    const state = req.body.state || req.body.province || req.body.state_province;
+
+    const sensitiveFields = [
+      "routing_number",
+      "account_number",
+      "bank_account_number",
+      "ssn_last_4",
+      "date_of_birth",
+      "phone",
+      "iban",
+      "payout_account",
+      "payment_details",
+    ].filter((field) => req.body[field] !== undefined && req.body[field] !== null && req.body[field] !== "");
+
+    if (sensitiveFields.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Seller application does not accept payout or bank details.",
+        disallowed_fields: sensitiveFields,
+      });
+    }
+
+    if (seller_guidelines_accepted !== true) {
+      return res.status(422).json({
+        success: false,
+        message: "seller_guidelines_accepted must be true.",
+        missing_fields: ["seller_guidelines_accepted"],
+      });
+    }
+
+    const missingAddressFields = [];
+    if (!address_line_1) missingAddressFields.push("address_line_1");
+    if (!city) missingAddressFields.push("city");
+    if (!state) missingAddressFields.push("state");
+    if (!country) missingAddressFields.push("country");
+    if (!postal_code) missingAddressFields.push("postal_code");
+
+    if (missingAddressFields.length > 0) {
+      return res.status(422).json({
+        success: false,
+        message: "Full address is required.",
+        missing_fields: missingAddressFields,
+      });
+    }
+
+    if (
+      has_livestream_experience !== null &&
+      typeof has_livestream_experience !== "boolean"
+    ) {
+      return res.status(422).json({
+        success: false,
+        message: "has_livestream_experience must be boolean or null.",
+      });
+    }
+
+    const user = await userModel.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+    if (user.seller === true) {
+      return res.status(409).json({
+        success: false,
+        message: "User is already an approved seller.",
+        seller_application: user.seller_application,
+      });
+    }
+
+    await addressModel.updateMany({ userId }, { $set: { primary: false } });
+    const address = await addressModel.create({
+      name: `${user.firstName || ""} ${user.lastName || ""}`.trim() || user.userName,
+      addrress1: address_line_1,
+      addrress2: address_line_2,
+      city,
+      state,
+      country,
+      zipcode: postal_code,
+      userId,
+      primary: true,
+    });
+
+    const now = new Date();
+    const updatedUser = await userModel.findByIdAndUpdate(
+      userId,
+      {
+        $set: {
+          applied_seller: true,
+          address: address._id,
+          seller: false,
+          seller_application: {
+            status: "pending",
+            seller_guidelines_accepted: true,
+            guidelines_accepted_at: now,
+            instagram_link,
+            tiktok_link,
+            facebook_link,
+            website_link,
+            has_livestream_experience,
+            referral_source,
+            submitted_at: now,
+            reviewed_at: null,
+            reviewed_by: null,
+            rejection_reason: "",
+          },
+        },
+      },
+      { new: true, runValidators: true }
+    ).populate("address");
+
+    return res.status(201).json({
+      success: true,
+      message: "Seller application submitted successfully.",
+      seller_application: updatedUser.seller_application,
+      address: updatedUser.address,
+    });
+  } catch (error) {
+    console.error("submitSellerApplication error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to submit seller application.",
+      error: error.message,
+    });
+  }
+};
+
 exports.approveSeller = async (req, res) => {
-  let { action } = req.body;
+  let { action, rejection_reason = "" } = req.body;
+  const approved = action !== "reject";
+  const reviewedBy = req.user?._authType === "admin" ? req.user._id : req.body.reviewed_by || null;
   let response = await userModel.findByIdAndUpdate(
     req.params.id,
     {
-      $set: { seller: action == "reject" ? false : true },
+      $set: {
+        seller: approved,
+        applied_seller: true,
+        "seller_application.status": approved ? "approved" : "rejected",
+        "seller_application.reviewed_at": new Date(),
+        "seller_application.reviewed_by": reviewedBy,
+        "seller_application.rejection_reason": approved ? "" : rejection_reason,
+      },
     },
     { new: true, runValidators: true }
   );
+  if (!response) {
+    return res.status(404).json({ success: false, message: "User not found" });
+  }
 
   var data = await functions.getSettings();
-  if (data["stripeSecretKey"] !== "") {
+  if (response?.stripe_account && data["stripeSecretKey"] !== "") {
     const stripe = require("stripe")(data["stripeSecretKey"]);
     await stripe.accounts.update(response.stripe_account, {
       settings: {
@@ -434,8 +592,19 @@ exports.getUsers = async (req, res, next) => {
     queryObject.$or = [{ userName: { $regex: `${title}`, $options: "i" } }, { firstName: { $regex: `${title}`, $options: "i" } }, { lastName: { $regex: `${title}`, $options: "i" } }, { email: { $regex: `${title}`, $options: "i" } }];
   }
   if (status == "pending") {
+    const titleOr = queryObject.$or;
+    const pendingOr = [
+      { "seller_application.status": "pending" },
+      { "seller_application.status": { $exists: false } },
+    ];
     queryObject.applied_seller = true;
     queryObject.seller = false;
+    if (titleOr) {
+      delete queryObject.$or;
+      queryObject.$and = [{ $or: titleOr }, { $or: pendingOr }];
+    } else {
+      queryObject.$or = pendingOr;
+    }
   }
   if (status == "suspended") {
     queryObject.suspended = true;
@@ -1180,7 +1349,11 @@ exports.userStats = async (req, res) => {
     );
     let pendingSellers = await userModel.countDocuments({
       applied_seller: true,
-      seller: false
+      seller: false,
+      $or: [
+        { "seller_application.status": "pending" },
+        { "seller_application.status": { $exists: false } },
+      ],
     })
     let activeSellers = await userModel.countDocuments({
       applied_seller: true,
@@ -1746,4 +1919,3 @@ exports.accountStatistics = async (req, res) => {
     });
   }
 };
-

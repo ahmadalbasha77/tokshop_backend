@@ -5,6 +5,7 @@ const auctionModel = require("../models/auction");
 const roomsModel = require("../models/room");
 const userModel = require("../models/user");
 const socketEmitter = require("../shared/socketEmitter");
+const { requireSellerProfileCompleteByUserId } = require("../shared/sellerProfile");
 
 exports.searchAll = async (req, res) => {
   try {
@@ -544,6 +545,10 @@ exports.addProductReview = async (req, res) => {
 exports.bulkAddProduct = async (req, res) => {
   let { products } = req.body;
   try {
+    const ownerId = products?.[0]?.ownerId || products?.[0]?.userId || req.body.userId;
+    const sellerProfile = await requireSellerProfileCompleteByUserId(res, ownerId);
+    if (!sellerProfile.ok) return;
+
     let response = await productModel.insertMany(products);
     res
       .status(200)
@@ -562,6 +567,20 @@ exports.bulkUpdateProduct = async (req, res) => {
   let { productIds, updates } = req.body;
 
   try {
+    const isPublishing =
+      updates?.deleted === false ||
+      updates?.published === true ||
+      updates?.active === true ||
+      updates?.featured === true ||
+      updates?.quantity !== undefined ||
+      updates?.listing_type !== undefined;
+
+    if (isPublishing) {
+      const existingProduct = await productModel.findById(productIds?.[0]).select("ownerId");
+      const sellerProfile = await requireSellerProfileCompleteByUserId(res, existingProduct?.ownerId);
+      if (!sellerProfile.ok) return;
+    }
+
     let response = await productModel.updateMany(
       { _id: { $in: productIds } },   // filter
       { $set: updates }               // update
@@ -607,6 +626,9 @@ exports.addProduct = async (req, res) => {
       list_individually,
       started = false
     } = req.body;
+
+    const sellerProfile = await requireSellerProfileCompleteByUserId(res, userId);
+    if (!sellerProfile.ok) return;
 
     const baseProduct = {
       name,
@@ -884,6 +906,25 @@ exports.updateProductById = async (req, res) => {
   newObj.tokshow = newObj.tokshow == "" ? null : newObj?.tokshow;
   const { started = false } = req.body;
   try {
+    const isPublishing =
+      req.body.deleted === false ||
+      req.body.published === true ||
+      req.body.active === true ||
+      req.body.featured === true ||
+      req.body.quantity !== undefined ||
+      req.body.listing_type !== undefined;
+
+    let productOwnerId = req.body.userId || req.body.ownerId;
+    if (isPublishing && !productOwnerId) {
+      const existingProduct = await productModel.findById(req.params.productId).select("ownerId");
+      productOwnerId = existingProduct?.ownerId;
+    }
+
+    if (isPublishing && productOwnerId) {
+      const sellerProfile = await requireSellerProfileCompleteByUserId(res, productOwnerId);
+      if (!sellerProfile.ok) return;
+    }
+
     if (newObj?.listing_type == "auction") {
       newObj.default_startprice = newObj.startingPrice;
       newObj.price = newObj.startingPrice;
@@ -1052,6 +1093,10 @@ exports.deleteProductById = async (req, res) => {
 exports.updateManyProducts = async (req, res) => {
   let { ids, payload } = req.body;
   console.log("payload ", payload, ids);
+  const existingProduct = await productModel.findById(ids?.[0]).select("ownerId");
+  const sellerProfile = await requireSellerProfileCompleteByUserId(res, existingProduct?.ownerId);
+  if (!sellerProfile.ok) return;
+
   await Promise.all(
     ids.map(async (id) => {
       let auctionId = new mongoose.Types.ObjectId();

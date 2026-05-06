@@ -29,6 +29,62 @@ const user = new Schema(
       type: Boolean,
       default: false,
     },
+    seller_application: {
+      status: {
+        type: String,
+        enum: ["pending", "approved", "rejected"],
+        default: undefined,
+      },
+      seller_guidelines_accepted: {
+        type: Boolean,
+        default: false,
+      },
+      guidelines_accepted_at: {
+        type: Date,
+        default: null,
+      },
+      instagram_link: {
+        type: String,
+        default: "",
+      },
+      tiktok_link: {
+        type: String,
+        default: "",
+      },
+      facebook_link: {
+        type: String,
+        default: "",
+      },
+      website_link: {
+        type: String,
+        default: "",
+      },
+      has_livestream_experience: {
+        type: Boolean,
+        default: null,
+      },
+      referral_source: {
+        type: String,
+        default: "",
+      },
+      submitted_at: {
+        type: Date,
+        default: null,
+      },
+      reviewed_at: {
+        type: Date,
+        default: null,
+      },
+      reviewed_by: {
+        type: Schema.Types.ObjectId,
+        ref: "admin",
+        default: null,
+      },
+      rejection_reason: {
+        type: String,
+        default: "",
+      },
+    },
     above_age:{
       type: Boolean,
       default: false,
