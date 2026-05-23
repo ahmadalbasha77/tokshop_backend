@@ -2037,6 +2037,7 @@ function isSameAddress(a, b) {
     a.countryCode === b?.countryCode
   );
 }
+
 async function getCheapestUSPSRate(data) {
   let {
     weight,
@@ -2084,12 +2085,13 @@ async function getCheapestUSPSRate(data) {
     };
   } else {
     ownerAddress = await addressModel
-      .findOne({ userId: owner }).populate("userId", "userName email")
+      .findOne({ userId: owner }).populate("userId", "userName")
       .sort({ primary: -1, createdAt: 1 });
     if (!ownerAddress) throw new Error("Seller has no address");
 
     customerAddress = await addressModel.findOne({ userId: customer }).populate("userId", "userName").sort({ primary: -1, createdAt: 1 });
   }
+
   // console.log(ownerAddress, customerAddress,customer)
   const sameAddress = isSameAddress(ownerAddress, customerAddress);
   // console.log(' sameAddress ',sameAddress)
@@ -2321,7 +2323,7 @@ async function getCheapestUSPSRate(data) {
       zip: ownerAddress?.zipcode,
       country: ownerAddress?.countryCode || "US",
       phone: ownerAddress?.phone,
-      email: ownerAddress?.userId?.email || ownerAddress?.email,
+      email: ownerAddress?.email,
     },
     addressTo: {
       name: customerAddress?.name == "" ? customerAddress?.userId?.userName : customerAddress?.name,

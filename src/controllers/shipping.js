@@ -9,50 +9,6 @@ const roomsModel = require("../models/room");
 const functions = require("../shared/functions");
 const { default: mongoose } = require("mongoose");
 const addressModel = require("../models/address");
-
-function isMissingSenderEmailError(message = "") {
-  return /address_from\.email/i.test(message) && /must not be empty/i.test(message);
-}
-
-async function regenerateRateForExistingOrder(orderData) {
-  const orderItems = await itemModel
-    .find({ orderId: orderData._id })
-    .populate("productId");
-
-  const items = orderItems.map((item) => ({
-    name: item.productId?.name,
-    quantity: item.quantity,
-    weight: item.weight,
-    price: item.price,
-    hsCode: item.productId?.category?.hs_code ?? "950440",
-  }));
-
-  const itemsWeight = orderItems.reduce(
-    (total, item) => total + parseFloat(item.weight || 0),
-    0
-  );
-
-  const refreshedRate = await functions.getCheapestUSPSRate({
-    weight: parseFloat(orderData?.weight || 0) || itemsWeight,
-    unit: orderData?.scale || "oz",
-    owner: orderData?.seller?._id || orderData?.seller,
-    customer: orderData?.customer?._id || orderData?.customer,
-    length: orderData?.length || 12,
-    width: orderData?.width || 12,
-    height: orderData?.height || 12,
-    tokshow: orderData?.tokshow ?? null,
-    smartBundle: false,
-    buying_label: true,
-    items,
-    order_id: orderData?._id,
-  });
-
-  if (!refreshedRate?.rate_id || refreshedRate.rate_id === "LOCAL_PICKUP") {
-    throw new Error("Unable to regenerate a purchasable shipping rate");
-  }
-
-  return refreshedRate;
-}
 exports.getShipping = async (req, res) => {
   const data = await shipping.find();
   res.status(200).json(data);
@@ -234,41 +190,11 @@ exports.buyLabel = async (req, res) => {
       console.log("estimate_data", estimate_data)
       let effectiveRateId = rate_id;
       let refreshedRate = null;
-      let transaction;
-
-      try {
-        transaction = await shippo.transactions.create({
-          rate: effectiveRateId,
-          label_file_type,
-          async: false,
-        });
-      } catch (error) {
-        if (!isMissingSenderEmailError(error?.message)) {
-          throw error;
-        }
-
-        refreshedRate = await regenerateRateForExistingOrder(orderData);
-        effectiveRateId = refreshedRate.rate_id;
-        transaction = await shippo.transactions.create({
-          rate: effectiveRateId,
-          label_file_type,
-          async: false,
-        });
-      }
-
-      const transactionError = transaction.messages?.[0]?.text || "";
-      if (
-        (!transaction.labelUrl || transaction.status == "ERROR") &&
-        isMissingSenderEmailError(transactionError)
-      ) {
-        refreshedRate = await regenerateRateForExistingOrder(orderData);
-        effectiveRateId = refreshedRate.rate_id;
-        transaction = await shippo.transactions.create({
-          rate: effectiveRateId,
-          label_file_type,
-          async: false,
-        });
-      }
+      const transaction = await shippo.transactions.create({
+        rate: effectiveRateId,
+        label_file_type,
+        async: false,
+      });
       console.log(transaction)
 
       if (!transaction.labelUrl || transaction.status == "ERROR") {
