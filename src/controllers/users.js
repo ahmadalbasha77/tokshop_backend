@@ -261,6 +261,7 @@ exports.submitSellerApplication = async (req, res) => {
       referral_source = "",
     } = req.body;
     const state = req.body.state || req.body.province || req.body.state_province;
+    const countryCode = req.body.countryCode || req.body.country_code || (String(country || "").toLowerCase() === "united states" ? "US" : country);
 
     const sensitiveFields = [
       "routing_number",
@@ -334,6 +335,7 @@ exports.submitSellerApplication = async (req, res) => {
       city,
       state,
       country,
+      countryCode,
       zipcode: postal_code,
       phone: phone || req.body.phonenumber || user.phonenumber || "",
       email: email || user.email || "",
