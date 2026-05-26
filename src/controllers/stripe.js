@@ -15,6 +15,23 @@ const {
 
 var mongoose = require("mongoose");
 
+const normalizeStripeCountryCode = (countryCode, country) => {
+  const rawValue = String(countryCode || country || "").trim();
+  if (!rawValue) return "";
+
+  const compactValue = rawValue.replace(/[\s._-]+/g, "").toUpperCase();
+  const aliases = {
+    US: "US",
+    USA: "US",
+    UNITEDSTATES: "US",
+    UNITEDSTATESOFAMERICA: "US",
+  };
+
+  if (aliases[compactValue]) return aliases[compactValue];
+  if (/^[A-Z]{2}$/.test(compactValue)) return compactValue;
+  return "";
+};
+
 exports.getRevenue = async (req, res) => {
   try {
     let { from, to, page, limit } = req.query;
@@ -715,6 +732,13 @@ exports.connect = async (req, res) => {
       success: false,
       code: "SELLER_NOT_APPROVED",
       message: "Seller approval is required before completing payout setup.",
+    });
+  }
+  countryCode = normalizeStripeCountryCode(countryCode, country);
+  if (!countryCode) {
+    return res.status(400).json({
+      success: false,
+      error: "Country code must be a 2-character ISO code, such as US, EG, or GB.",
     });
   }
   // if (create_address == true) {
