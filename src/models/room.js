@@ -124,6 +124,10 @@ const roomSchema = new Schema(
         ref: "user",
       },
     ],
+    viewersCount: {
+      type: Number,
+      default: 0,
+    },
     auctions: [
       {
         type: Schema.Types.ObjectId,
@@ -225,6 +229,8 @@ const roomSchema = new Schema(
   },
   { timestamps: true, autoIndex: true, autoCreate: true }
 );
+
+roomSchema.index({ started: 1, ended: 1, status: 1, viewersCount: -1 });
 
 const roomModel = model("rooms", roomSchema);
 module.exports = roomModel;

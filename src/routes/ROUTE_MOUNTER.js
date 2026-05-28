@@ -26,6 +26,7 @@ const livekitPublic = require("./livekit.public");
 const settingsController = require("../controllers/settings");
 const shippingController = require("../controllers/shipping");
 const userController = require("../controllers/users");
+const roomController = require("../controllers/rooms");
 
 require("../services/authenticate");
 
@@ -76,6 +77,10 @@ router.use("/content", contentsRouter);
 router.use("/address", 
   passport.authenticate("jwt", { session: false }),
     addressRouter);
+router.get("/tokshows/most-viewed-live",
+  passport.authenticate("jwt", { session: false }),
+  roomController.getMostViewedLiveShows
+);
 router.use("/rooms",
      passport.authenticate("jwt", { session: false }), 
 roomRouter);

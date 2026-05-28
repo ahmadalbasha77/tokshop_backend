@@ -326,6 +326,52 @@ exports.sendRoomNotifications = async (req, res) => {
   }
 };
 
+exports.getMostViewedLiveShows = async (req, res) => {
+  try {
+    let limits = Number(req.query.limit) || 15;
+    limits = Math.max(1, Math.min(limits, 15));
+
+    const rooms = await roomsModel.aggregate([
+      {
+        $match: {
+          started: true,
+          ended: { $ne: true },
+          $or: [{ status: "active" }, { status: true }],
+        },
+      },
+      {
+        $addFields: {
+          viewersCount: {
+            $ifNull: [
+              "$viewersCount",
+              { $size: { $ifNull: ["$viewers", []] } },
+            ],
+          },
+        },
+      },
+      {
+        $sort: { viewersCount: -1, startedTime: -1, createdAt: -1 },
+      },
+      {
+        $limit: limits,
+      },
+    ]);
+
+    await roomsModel.populate(rooms, await functions.populateRoomOptions());
+
+    res.status(200).setHeader("Content-Type", "application/json").json({
+      rooms,
+      totalDoc: rooms.length,
+      limits,
+      pages: 1,
+    });
+  } catch (err) {
+    res.status(500).send({
+      message: err.message,
+    });
+  }
+};
+
 exports.makeRoomFeatured = async (req, res) => {
   try {
     console.log(req.params.roomId);

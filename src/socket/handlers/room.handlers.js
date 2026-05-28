@@ -129,6 +129,16 @@ module.exports = (io, socket) => {
                 },
                 { new: true }
             ).populate("pinned");
+            if (room) {
+                const viewersCount = room.viewers?.length || 0;
+                if (room.viewersCount !== viewersCount) {
+                    room = await roomsModel.findByIdAndUpdate(
+                        roomId,
+                        { $set: { viewersCount } },
+                        { new: true }
+                    ).populate("pinned");
+                }
+            }
             if (room?.category) {
                 await category.findByIdAndUpdate(
                     room.category,
@@ -156,16 +166,23 @@ module.exports = (io, socket) => {
             socket.emit("error", "Failed to join room");
         }
     });
-    socket.on("leave-room", (data) => {
+    socket.on("leave-room", async (data) => {
         let { roomId, userId, userName } = data;
         console.log("leave-room", data);
         io.to(roomId).emit("left-room", { roomId, userId, userName });
         socket.leave(roomId);
         // remove viewer from room
-        roomsModel.findByIdAndUpdate(
+        const room = await roomsModel.findByIdAndUpdate(
             roomId,
             { $pull: { viewers: userId } },
             { runValidators: true, new: true }
         );
+        if (room) {
+            await roomsModel.findByIdAndUpdate(
+                roomId,
+                { $set: { viewersCount: room.viewers?.length || 0 } },
+                { runValidators: true }
+            );
+        }
     });
 };

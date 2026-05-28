@@ -1623,6 +1623,7 @@ async function populateRoomOptions() {
         "userName",
         "email",
         "profilePhoto",
+        "coverPhoto",
         "followersCount",
         "followingCount",
         "followers",
