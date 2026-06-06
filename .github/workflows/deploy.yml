@@ -34,6 +34,6 @@ jobs:
             
             # Restart PM2
             echo "🔄 Restarting PM2..."
-            pm2 restart tokshop-api
+            pm2 restart app
             
             echo "✅ Backend deployment complete!"
