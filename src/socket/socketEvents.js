@@ -19,6 +19,40 @@ const {
 const { startRecording } = require("../shared/livekit");
 const { checkSellerProfileComplete, incompleteProfileResponse } = require("../shared/sellerProfile");
 
+function auctionPaymentErrorPayload(err, auctionId) {
+  const paymentError = err?.paymentError || err?.error || err;
+  const providerMessage =
+    (typeof paymentError === "string" ? paymentError : null) ||
+    paymentError?.providerMessage ||
+    paymentError?.error ||
+    paymentError?.message ||
+    err?.message ||
+    "Payment failed";
+
+  console.error("Auction payment failed", {
+    message: err?.message || providerMessage,
+    stack: err?.stack,
+    code: paymentError?.code,
+    type: paymentError?.type,
+    declineCode: paymentError?.decline_code,
+    providerMessage,
+    auctionId: err?.auctionId || auctionId,
+    userId: err?.userId,
+    paymentIntentId: paymentError?.paymentIntentId || err?.paymentIntentId,
+    originalError: err
+  });
+
+  return {
+    message: "Payment failed",
+    code: paymentError?.code || "PAYMENT_FAILED",
+    providerMessage,
+    declineCode: paymentError?.decline_code || null,
+    auctionId: err?.auctionId || auctionId?.toString(),
+    userId: err?.userId || null,
+    paymentIntentId: paymentError?.paymentIntentId || err?.paymentIntentId || null
+  };
+}
+
 
 const registerUserHandlers = require("./handlers/user.handlers");
 const registerRoomHandlers = require("./handlers/room.handlers");
@@ -273,6 +307,7 @@ module.exports = (io) => {
           res.bids = [bid];
           res.baseprice = startBidAmount;
           res.newbaseprice = startBidAmount + 1;
+          res.higestbid = startBidAmount;
 
           await res.save();
 
@@ -300,11 +335,7 @@ module.exports = (io) => {
         
         startRunningTimer(res, async (err, result) => {
           if (err) {
-            io.to(roomId).emit("auction-error", {
-              code: err?.error?.code,
-              message: err?.buyerUserName+" payment failed",
-              error: err?.error?.error
-            });
+            io.to(roomId).emit("auction-error", auctionPaymentErrorPayload(err, res?._id));
           } else {
             if (result.updateQty == true) {
               io.to(roomId).emit("auction-update", result?.response);
@@ -457,12 +488,18 @@ module.exports = (io) => {
           type = "show",
           custom_bid = false,
         } = data;
+        amount = Number(amount);
+        if (!Number.isFinite(amount)) {
+          return socket.emit("bid-error", {
+            code: "INVALID_BID_AMOUNT",
+            message: "Bid amount must be a valid number"
+          });
+        }
         const query = { user, auction };
         const update = {
           $set: { amount, auction, user, autobid, autobidamount,custom_bid },
         };
         const options = { upsert: true, new: true };
-        let newPrice = amount + 1;
         await bid(
           query,
           update,
@@ -501,8 +538,8 @@ module.exports = (io) => {
                 }
               }
               response.baseprice = highestBid;
-              // response.newbaseprice = highestBid + 1;
-              response.newbaseprice = newPrice; 
+              response.higestbid = highestBid;
+              response.newbaseprice = highestBid + 1;
               await response.save();
               if (type == "scheduled") { 
                 roomId = auction;

@@ -207,11 +207,17 @@ async function createOrder({
   const paymentmethod = await paymentmethodModel.findOne({
     userid: buyer,
     primary: true,
-    customerid: { $ne: null },
+    customerid: { $nin: [null, ""] },
+    paymentMethodId: { $nin: [null, ""] },
     status: { $ne: "blocked" }
   });
 
-  if (!paymentmethod) throw new Error("No valid payment method");
+  if (!paymentmethod) {
+    const error = new Error("Customer does not have a valid Stripe payment method");
+    error.code = "STRIPE_PAYMENT_METHOD_MISSING";
+    error.type = "payment_method_error";
+    throw error;
+  }
 
   // ================= PRODUCT =================
   const productres = await productModel
@@ -390,7 +396,14 @@ async function createOrder({
       );
     }
 
-    return { success: false, retryable: true, orderId: orderId, message: error?.error, error: error?.error };
+    return {
+      success: false,
+      retryable: true,
+      orderId,
+      message: error?.error || "Payment failed",
+      error: error?.error || "Payment failed",
+      paymentError: error
+    };
   }
 
   let newOrder = await orderModel.findOne({
@@ -523,7 +536,7 @@ async function retryOrderPayment(orderId) {
       order.service_fee,
       shipping.amount,
       order.tax,
-      order.referralDiscount,
+      order.discount ?? 0,
       order?.customer
     );
 
@@ -790,13 +803,46 @@ async function chargeStripePaymentMethod(
     var response = await getSettings();
     const stripe = require("stripe")(response["stripeSecretKey"]);
 
-    const toCents = num => Math.round(Number(num) * 100);
+    if (!paymentmethod?.customerid) {
+      const error = new Error("Customer does not have a Stripe customer");
+      error.code = "STRIPE_CUSTOMER_MISSING";
+      error.type = "payment_method_error";
+      throw error;
+    }
+    if (!paymentmethod?.paymentMethodId) {
+      const error = new Error("Customer does not have a Stripe payment method");
+      error.code = "STRIPE_PAYMENT_METHOD_MISSING";
+      error.type = "payment_method_error";
+      throw error;
+    }
+
+    const stripePaymentMethod = await stripe.paymentMethods.retrieve(paymentmethod.paymentMethodId);
+    const stripeCustomerId = typeof stripePaymentMethod.customer === "string"
+      ? stripePaymentMethod.customer
+      : stripePaymentMethod.customer?.id;
+    if (stripeCustomerId !== paymentmethod.customerid) {
+      const error = new Error("Stripe payment method is not attached to the customer's Stripe customer");
+      error.code = "PAYMENT_METHOD_CUSTOMER_MISMATCH";
+      error.type = "payment_method_error";
+      throw error;
+    }
+
+    const toCents = (num, fieldName) => {
+      const value = Number(num);
+      if (!Number.isFinite(value)) {
+        const error = new Error(`Invalid payment amount: ${fieldName}`);
+        error.code = "INVALID_PAYMENT_AMOUNT";
+        error.type = "validation_error";
+        throw error;
+      }
+      return Math.round(value * 100);
+    };
     console.log('orderTotal ', orderTotal)
-    const amountCents = toCents(orderTotal);
-    const shippingCents = toCents(shippingFee ?? 0);
+    const amountCents = toCents(orderTotal, "orderTotal");
+    const shippingCents = toCents(shippingFee ?? 0, "shippingFee");
     // const appFeeCents = toCents(serviceFee);
-    const taxCents = toCents(tax);
-    const referralDiscountCents = toCents(referralDiscount);
+    const taxCents = toCents(tax ?? 0, "tax");
+    const referralDiscountCents = toCents(referralDiscount ?? 0, "referralDiscount");
 
     const totalChargeCents = amountCents + shippingCents + taxCents - referralDiscountCents;
     let payload = {
@@ -847,16 +893,50 @@ async function chargeStripePaymentMethod(
       success: true
     };
   } catch (err) {
-    console.log(err);
+    const rawPaymentIntent = err.raw?.payment_intent;
+    const lastPaymentError = rawPaymentIntent?.last_payment_error;
+    const paymentIntentId =
+      err.payment_intent?.id ||
+      rawPaymentIntent?.id ||
+      (typeof rawPaymentIntent === "string" ? rawPaymentIntent : null) ||
+      null;
+    const providerMessage =
+      err.raw?.message ||
+      lastPaymentError?.message ||
+      err.message ||
+      "Payment failed";
+    const errorCode = err.code || err.raw?.code || lastPaymentError?.code || "PAYMENT_FAILED";
+    const errorType = err.type || err.raw?.type || lastPaymentError?.type || "payment_error";
+    const declineCode =
+      err.decline_code ||
+      err.raw?.decline_code ||
+      lastPaymentError?.decline_code ||
+      null;
+    console.error("Stripe original error:", err);
+    console.error("Stripe payment failed", {
+      message: err.message,
+      stack: err.stack,
+      code: errorCode,
+      type: errorType,
+      decline_code: declineCode,
+      providerMessage,
+      paymentIntentId,
+      requestId: err.requestId || err.raw?.requestId,
+      providerResponse: err.raw
+    });
     let response = {
-      paymentIntent: err.raw.payment_intent?.id,
-      charge: err.raw.charge,
+      paymentIntent: paymentIntentId,
+      charge: err.raw?.charge,
       balanceTx: null,
       error: {
         ok: false,
-        error: err.message || 'Payment failed',
-        code: err.code,
-        decline_code: err.decline_code,
+        error: providerMessage,
+        message: "Payment failed",
+        providerMessage,
+        code: errorCode,
+        type: errorType,
+        decline_code: declineCode,
+        paymentIntentId,
         requestId: err.requestId || (err.raw && err.raw.requestId)
       },
       success: false
@@ -1571,38 +1651,83 @@ const createAuctionCharge = async (auction) => {
   if (highestBidder?.awarded_referal_credit == false && highestBidder?.referredBy) {
     allow_referal_discount = true
   }
-  const resultres = await createOrder({
-    buyer: highestBidder._id,
-    product: auction.product,
-    quantity: 1,
-    color: "",
-    size: "",
-    subtotal: orderTotal,
-    seller,
-    tax,
-    tokshow: auction.tokshow,
-    shippingFee: parseFloat(shippingCost),
-    rate_id,
-    ordertype: "auction",
-    bidTotal: highestBid,
-    servicelevel: servicelevelName,
-    totalWeightOz,
-    bundleId,
-    seller_shipping_fee_pay,
-    carrierAccount,
-    egressId: auction?.egressId,
-    carrier,
-    shipping: shipping_response,
-    allow_referal_discount
-  });
+  let aucres = await auctionModel.findByIdAndUpdate(
+    auction?._id,
+    {
+      winner: highestBidder,
+      winning: highestBidder,
+      higestbid: highestBid,
+      baseprice: highestBid,
+      newbaseprice: highestBid + 1
+    },
+    { new: true }
+  ).populate(await getAuctionPopulateOptions());
 
-  let aucres = await auctionModel.findByIdAndUpdate(auction?._id, { winner: highestBidder }, { new: true }).populate(await getAuctionPopulateOptions());
+  let resultres;
+  try {
+    resultres = await createOrder({
+      buyer: highestBidder._id,
+      product: auction.product,
+      quantity: 1,
+      color: "",
+      size: "",
+      subtotal: orderTotal,
+      seller,
+      tax,
+      tokshow: auction.tokshow,
+      shippingFee: parseFloat(shippingCost),
+      rate_id,
+      ordertype: "auction",
+      bidTotal: highestBid,
+      servicelevel: servicelevelName,
+      totalWeightOz,
+      bundleId,
+      seller_shipping_fee_pay,
+      carrierAccount,
+      egressId: auction?.egressId,
+      carrier,
+      shipping: shipping_response,
+      allow_referal_discount
+    });
+  } catch (err) {
+    console.error("Auction order payment setup failed", {
+      message: err.message,
+      stack: err.stack,
+      code: err.code,
+      type: err.type,
+      auctionId: auction?._id?.toString(),
+      userId: highestBidder?._id?.toString()
+    });
+    const aucresObj = aucres?.toObject ? aucres.toObject() : aucres;
+    return {
+      ...aucresObj,
+      success: false,
+      auctionId: auction?._id?.toString(),
+      userId: highestBidder?._id?.toString(),
+      paymentError: {
+        error: err.message || "Payment failed",
+        providerMessage: err.message || "Payment failed",
+        code: err.code || "PAYMENT_SETUP_FAILED",
+        type: err.type || "payment_error",
+        decline_code: err.decline_code || null,
+        paymentIntentId: err.payment_intent?.id || err.raw?.payment_intent?.id || null
+      }
+    };
+  }
+
   //update order item with video receipt
   if (aucres?.videoReceipt) {
     await itemModel.findByIdAndUpdate(resultres?.newItem?._id, { videoReceipt: aucres?.videoReceipt })
   }
   const aucresObj = aucres?.toObject ? aucres.toObject() : aucres;
-  return { ...aucresObj, success: resultres?.success };
+  return {
+    ...aucresObj,
+    success: resultres?.success,
+    auctionId: auction?._id?.toString(),
+    userId: highestBidder?._id?.toString(),
+    paymentError: resultres?.paymentError,
+    paymentIntentId: resultres?.paymentError?.paymentIntentId
+  };
   // } catch (error) {
   //   return null;
   // }
@@ -1881,7 +2006,11 @@ const _bid = async (query, update, options, auction, increaseBidBy) => {
         $addToSet: {
           bids: bidresponse._id,
         },
-        $set: { baseprice: increaseBidBy },
+        $set: {
+          baseprice: increaseBidBy,
+          higestbid: increaseBidBy,
+          newbaseprice: Number(increaseBidBy) + 1
+        },
       },
       { runValidators: true, new: true }
     )
@@ -1905,7 +2034,11 @@ const bid = async (
         $addToSet: {
           bids: bidresponse._id,
         },
-        $set: { baseprice },
+        $set: {
+          baseprice,
+          higestbid: baseprice,
+          newbaseprice: Number(baseprice) + 1
+        },
       },
       { runValidators: true, new: true }
     )
@@ -1979,48 +2112,46 @@ async function startRunningTimer(auction, callback) {
         auction = newauction
       }
 
-      createAuctionCharge(auction).then(async (response) => {
-        if (response?.success == false) {
-          callback(response, response);
-        } else {
-          //RESET / CREATE NEXT AUCTION HERE
-          const initialProductQty = auction.product.quantity;
-          const soldQty = auction.quantity;
-          const remainingQty = initialProductQty - soldQty;
-          console.log("remainingQty ", remainingQty)
-          if (remainingQty > 0) {
-            const newAuction = await auctionModel.create({
-              product: auction.product,
-              tokshow: auction.tokshow,
+      const response = await createAuctionCharge(auction);
+      if (response?.success == false) {
+        callback(response, null);
+        return;
+      }
 
-              baseprice: auction.product.default_startprice,
-              newbaseprice: auction.product.default_startprice,
+      //RESET / CREATE NEXT AUCTION HERE
+      const initialProductQty = auction.product.quantity;
+      const soldQty = auction.quantity;
+      const remainingQty = initialProductQty - soldQty;
+      console.log("remainingQty ", remainingQty)
+      if (remainingQty > 0) {
+        const newAuction = await auctionModel.create({
+          product: auction.product,
+          tokshow: auction.tokshow,
 
-              increaseBidBy: auction.increaseBidBy,
-              duration: auction.duration,
-              sudden: auction.sudden,
+          baseprice: auction.product.default_startprice,
+          newbaseprice: auction.product.default_startprice,
 
-              started: false,
-              ended: false,
-              bids: [],
-            });
+          increaseBidBy: auction.increaseBidBy,
+          duration: auction.duration,
+          sudden: auction.sudden,
 
-            await productModel.updateOne(
-              { _id: auction.product },
-              {
-                $set: {
-                  auction: newAuction._id,
-                  prebids: [],
-                },
-              }
-            );
+          started: false,
+          ended: false,
+          bids: [],
+        });
+
+        await productModel.updateOne(
+          { _id: auction.product },
+          {
+            $set: {
+              auction: newAuction._id,
+              prebids: [],
+            },
           }
-          // ✅ END RESET LOGIC
-          //this is just to make the ui refresh the auctions list to reduce its qty if the auction had more than one qty
-          callback(null, { response, updateQty: true });
-        }
-      })
-      callback(null, auction);
+        );
+      }
+      // ✅ END RESET LOGIC
+      callback(null, response);
     } catch (err) {
       callback(err, null);
     }

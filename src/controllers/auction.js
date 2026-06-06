@@ -99,15 +99,19 @@ exports.bid = async (req, res, next) => {
     let { user, auction, amount, custom_bid =false } = req.body;
 
     const query = { user, auction };
-    const update = { $set: { amount, auction, user,custom_bid } };
+    const bidAmount = Number(amount);
+    if (!Number.isFinite(bidAmount)) {
+      return res.status(400).json({ error: "Invalid bid amount" });
+    }
+    const update = { $set: { amount: bidAmount, auction, user,custom_bid } };
     const options = { upsert: true, new: true };
+    let newPrice = bidAmount + 1;
 
-    let newPrice = amount + 1;
-
-    let response = await bid(query, update, options, auction, amount);
+    let response = await bid(query, update, options, auction, bidAmount);
     console.log(response)
     if (!response) return res.status(400).json({ error: "Bid failed" });
 
+    response.higestbid = bidAmount;
     response.newbaseprice = newPrice;
     await response.save();
 
