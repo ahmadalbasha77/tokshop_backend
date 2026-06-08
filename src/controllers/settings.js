@@ -1,48 +1,116 @@
 const AppSettingsSchema = require("../models/settings");
 
+const SETTINGS_QUERY_TIMEOUT_MS = 10000;
+const SETTINGS_UPDATE_FIELDS = new Set(
+  Object.keys(AppSettingsSchema.schema.paths).filter(
+    (field) => !["_id", "__v"].includes(field)
+  )
+);
+
+function getAllowedUpdates(body) {
+  return Object.fromEntries(
+    Object.entries(body || {}).filter(
+      ([field, value]) =>
+        SETTINGS_UPDATE_FIELDS.has(field) && value !== undefined
+    )
+  );
+}
+
+function getErrorResponse(error) {
+  if (error?.name === "ValidationError" || error?.name === "CastError") {
+    return {
+      status: 400,
+      message: "Invalid settings data",
+    };
+  }
+
+  if (
+    error?.code === 50 ||
+    error?.name === "MongoServerSelectionError" ||
+    error?.name === "MongoNetworkTimeoutError"
+  ) {
+    return {
+      status: 504,
+      message: "Settings database request timed out",
+    };
+  }
+
+  return {
+    status: 500,
+    message: "Failed to process app settings",
+  };
+}
+
 exports.getAppSettings = async function (req, res) {
   try {
-    const settings = await AppSettingsSchema.find();
-
-    if (settings != null) {
-      res.json(settings);
-    } else {
-      res.json(settings);
-    }
+    const settings = await AppSettingsSchema.find().maxTimeMS(
+      SETTINGS_QUERY_TIMEOUT_MS
+    );
+    return res.status(200).json(settings);
   } catch (error) {
-    res.status(404).send({ success: false, message: error });
+    const response = getErrorResponse(error);
+    console.error("Error fetching app settings:", error);
+    return res.status(response.status).json({
+      success: false,
+      message: response.message,
+    });
   }
 };
 exports.getFirebaseSettings = async function (req, res) {
   try {
-    const settings = await AppSettingsSchema.find();    
-    if (settings != null) {
-      res.json({
-        firebase_api_key: settings[0].FIREBASE_API_KEY,
-        firebase_auth_domain: settings[0].firebase_auth_domain,
-        firebase_project_id: settings[0].firebase_project_id
+    const settings = await AppSettingsSchema.findOne()
+      .select("FIREBASE_API_KEY firebase_auth_domain firebase_project_id")
+      .maxTimeMS(SETTINGS_QUERY_TIMEOUT_MS);
+
+    if (!settings) {
+      return res.status(404).json({
+        success: false,
+        message: "App settings not found",
       });
-    } else {
-      res.json(settings);
     }
+
+    return res.status(200).json({
+      firebase_api_key: settings.FIREBASE_API_KEY,
+      firebase_auth_domain: settings.firebase_auth_domain,
+      firebase_project_id: settings.firebase_project_id,
+    });
   } catch (error) {
-    res.status(404).send({ success: false, message: error });
+    const response = getErrorResponse(error);
+    console.error("Error fetching Firebase settings:", error);
+    return res.status(response.status).json({
+      success: false,
+      message: response.message,
+    });
   }
-}
+};
 
 exports.saveAppSettings = async function (req, res) {
-  const settings = await AppSettingsSchema.find();
-  if (settings.length > 0) {
-    req.body.default_email_provider = req.body?.email_service_provider;
-    let settingsdata = await AppSettingsSchema.findByIdAndUpdate(
-      { _id: settings[0]._id },
-      { $set: req.body },
-      { runValidators: true , new: true }
+  try {
+    const updates = getAllowedUpdates(req.body);
+
+    if (Object.prototype.hasOwnProperty.call(updates, "email_service_provider")) {
+      updates.default_email_provider = updates.email_service_provider;
+    }
+
+    const settings = await AppSettingsSchema.findOneAndUpdate(
+      {},
+      { $set: updates },
+      {
+        new: true,
+        runValidators: true,
+        setDefaultsOnInsert: true,
+        upsert: true,
+        maxTimeMS: SETTINGS_QUERY_TIMEOUT_MS,
+      }
     );
-    res.status(200).json(settingsdata);
-  } else {
-    let settingsdata = new AppSettingsSchema(req.body);
-    let respo = await settingsdata.save();
-    return res.status(200).json(respo);
+
+    return res.status(200).json(settings);
+  } catch (error) {
+    const response = getErrorResponse(error);
+    console.error("Error saving app settings:", error);
+    return res.status(response.status).json({
+      success: false,
+      message: response.message,
+    });
   }
 };

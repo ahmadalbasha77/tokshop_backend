@@ -13,7 +13,9 @@ const connect = () => {
       throw new Error("MONGO_URI is not defined");
     }
     const options = {
-      serverSelectionTimeoutMS: 30000,
+      serverSelectionTimeoutMS: 10000,
+      connectTimeoutMS: 10000,
+      socketTimeoutMS: 30000,
     };
       mongoose
         .connect(process.env.MONGO_URI, options)

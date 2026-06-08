@@ -27,6 +27,8 @@ const settingsController = require("../controllers/settings");
 const shippingController = require("../controllers/shipping");
 const userController = require("../controllers/users");
 const roomController = require("../controllers/rooms");
+const requireAdminJson = require("../services/adminJsonAuth");
+const pendingServiceTransactionsController = require("../controllers/pendingServiceTransactions");
 
 require("../services/authenticate");
 
@@ -44,6 +46,11 @@ router.get(
 );
 // router.use("/users",  userRouter);
 router.use("/users/public/profile/:id", userController.publicProfile);
+router.get(
+  "/users/shipping/service/pending",
+  requireAdminJson,
+  pendingServiceTransactionsController.getPendingShippingServiceTransactions
+);
 router.use("/users",
   passport.authenticate("jwt", { session: false }),   
   userRouter);

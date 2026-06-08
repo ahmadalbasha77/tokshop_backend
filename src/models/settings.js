@@ -58,8 +58,8 @@ const AppSettingsSchema = mongoose.Schema({
     default: "",
   },
   appVersion: {
-    type: Number,
-    default: 0,
+    type: String,
+    default: "",
   },
   demoMode: {
     type: Boolean,
@@ -170,6 +170,10 @@ const AppSettingsSchema = mongoose.Schema({
     default: "", 
   },
   android_link: {
+    type: String,
+    default: "",
+  },
+  app_scheme: {
     type: String,
     default: "",
   },
