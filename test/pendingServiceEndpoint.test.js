@@ -56,6 +56,9 @@ function createResponse() {
   return {
     statusCode: null,
     body: null,
+    on() {
+      return this;
+    },
     status(code) {
       this.statusCode = code;
       return this;
@@ -145,6 +148,14 @@ void (async () => {
   authResult = authenticate(adminAccount);
   assert.equal(authResult.nextCalled, true);
   assert.equal(authResult.req.user, adminAccount);
+
+  authResult = authenticate(
+    null,
+    {},
+    Object.assign(new Error("jwt expired"), { name: "TokenExpiredError" })
+  );
+  assert.equal(authResult.res.statusCode, 401);
+  assert.equal(authResult.res.body.message, "Invalid or expired admin token");
 
   console.log("pending service endpoint tests passed");
 })().catch((error) => {

@@ -29,6 +29,7 @@ const userController = require("../controllers/users");
 const roomController = require("../controllers/rooms");
 const requireAdminJson = require("../services/adminJsonAuth");
 const pendingServiceTransactionsController = require("../controllers/pendingServiceTransactions");
+const adminReadController = require("../controllers/adminRead");
 
 require("../services/authenticate");
 
@@ -47,10 +48,32 @@ router.get(
 // router.use("/users",  userRouter);
 router.use("/users/public/profile/:id", userController.publicProfile);
 router.get(
+  "/admin/verify",
+  requireAdminJson,
+  adminReadController.verifyAdmin
+);
+router.get("/users", requireAdminJson, adminReadController.getUsers);
+router.get(
+  "/users/stats/all",
+  requireAdminJson,
+  adminReadController.getUserStats
+);
+router.get(
   "/users/shipping/service/pending",
   requireAdminJson,
   pendingServiceTransactionsController.getPendingShippingServiceTransactions
 );
+router.get(
+  "/orders/stats/all",
+  requireAdminJson,
+  adminReadController.getOrderStats
+);
+router.get(
+  "/rooms/stats/all",
+  requireAdminJson,
+  adminReadController.getRoomStats
+);
+router.get("/templates", requireAdminJson, adminReadController.getTemplates);
 router.use("/users",
   passport.authenticate("jwt", { session: false }),   
   userRouter);

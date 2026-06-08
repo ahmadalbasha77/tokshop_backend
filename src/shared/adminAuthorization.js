@@ -16,4 +16,10 @@ function getAdminAuthorizationFailure(account, info) {
   return null;
 }
 
-module.exports = { getAdminAuthorizationFailure };
+function isInvalidTokenError(error) {
+  return ["TokenExpiredError", "JsonWebTokenError", "NotBeforeError"].includes(
+    error?.name
+  );
+}
+
+module.exports = { getAdminAuthorizationFailure, isInvalidTokenError };
