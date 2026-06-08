@@ -3,6 +3,10 @@ const transactionModel = require("../models/transaction");
 const userModel = require("../models/user");
 var mongoose = require("mongoose");
 const { sendEmail } = require('../shared/email');
+const {
+  getStripeAccountStatus,
+  getStripeAccountStatusCode,
+} = require("../shared/stripeAccountStatus");
 const CUTOFF_UTC_MS = Date.parse("2026-02-25T03:00:00.000Z");
 exports.handleStripeWebhook = async (req, res) => {
   const sig = req.headers["stripe-signature"];
@@ -10,7 +14,6 @@ exports.handleStripeWebhook = async (req, res) => {
   var response = await functions.getSettings();
   const stripe = require("stripe")(response["stripeSecretKey"]);
   try {
-    console.log("req.body", req.body);
     event = stripe.webhooks.constructEvent(
       req.body, // raw buffer
       sig,
@@ -30,7 +33,6 @@ exports.handleStripePlatformWebhook = async (req, res) => {
   var response = await functions.getSettings();
   const stripe = require("stripe")(response["stripeSecretKey"]);
   try {
-    console.log("req.body", req.body);
     event = stripe.webhooks.constructEvent(
       req.body, // raw buffer
       sig,
@@ -47,6 +49,9 @@ exports.handleStripePlatformWebhook = async (req, res) => {
 async function handleStripePlatformEvent(event, stripe) {
   // Use event type and data object to do other things
   switch (event.type) {
+    case "account.updated":
+      await syncConnectedAccountStatus(event.data.object);
+      break;
     case "charge.succeeded":
       console.log("💳 Charge succeeded:", event.data.object.id);
       break;
@@ -93,6 +98,9 @@ async function handleStripePlatformEvent(event, stripe) {
 async function handleStripeEvent(event, stripe) {
   // Use event type and data object to do other things
   switch (event.type) {
+    case "account.updated":
+      await syncConnectedAccountStatus(event.data.object);
+      break;
     case "charge.succeeded":
       console.log("💳 Charge succeeded:", event.data.object.id);
       break;
@@ -164,6 +172,33 @@ async function handleStripeEvent(event, stripe) {
     default:
       console.log(`Unhandled event type: ${event.type}`);
   }
+}
+
+async function syncConnectedAccountStatus(account) {
+  if (!account?.id) return;
+
+  const stripeStatus = getStripeAccountStatus(account);
+  const statusCode = getStripeAccountStatusCode(stripeStatus);
+  const user = await userModel.findOneAndUpdate(
+    { stripe_account: account.id },
+    {
+      $set: {
+        stripe_status_code: statusCode,
+        stripe_verification_pending: stripeStatus.verification_pending,
+        stripe_status_updated_at: new Date(),
+      },
+    },
+    { new: true }
+  );
+
+  console.log("Stripe connected account status updated", {
+    stripeAccount: account.id,
+    userId: user?._id?.toString() || null,
+    code: statusCode,
+    onboardingRequired: stripeStatus.onboarding_required,
+    verificationPending: stripeStatus.verification_pending,
+    canSell: stripeStatus.can_sell,
+  });
 }
 
 async function processClearedTransactions(stripe) {

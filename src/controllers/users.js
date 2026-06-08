@@ -1,5 +1,6 @@
 const userModel = require("../models/user");
 const jwt = require("jsonwebtoken");
+const { getSellerEligibility } = require("../shared/sellerProfile");
 require("dotenv").config({ path: `${__dirname}/../../.env` });
 const functions = require("../shared/functions");
 const withdrawModel = require("../models/withdraw");
@@ -383,6 +384,48 @@ exports.submitSellerApplication = async (req, res) => {
       success: false,
       message: "Failed to submit seller application.",
       error: error.message,
+    });
+  }
+};
+
+exports.getSellerEligibility = async (req, res) => {
+  try {
+    if (
+      req.user?._authType !== "admin" &&
+      req.user?._id?.toString() !== req.params.userId
+    ) {
+      return res.status(403).json({
+        success: false,
+        can_sell: false,
+        code: "SELLER_ELIGIBILITY_ACCESS_DENIED",
+        message: "You cannot view another seller's Stripe eligibility.",
+      });
+    }
+    const user = await userModel.findById(req.params.userId).select(
+      "seller applied_seller seller_application stripe_account"
+    );
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        can_sell: false,
+        code: "USER_NOT_FOUND",
+        message: "User not found",
+      });
+    }
+
+    const eligibility = await getSellerEligibility(user);
+    return res.status(200).json(eligibility);
+  } catch (error) {
+    console.error("getSellerEligibility error:", {
+      userId: req.params.userId,
+      message: error.message,
+      stack: error.stack,
+    });
+    return res.status(503).json({
+      success: false,
+      can_sell: false,
+      code: "SELLER_STRIPE_STATUS_UNAVAILABLE",
+      message: "Unable to verify seller Stripe account status. Please try again.",
     });
   }
 };
@@ -1176,7 +1219,17 @@ exports.sendTip = async (req, res) => {
 };
 
 exports.editUserById = async (req, res) => {
-  console.log(req.body)
+  const serverManagedStripeFields = [
+    "stripe_account",
+    "stripe_status_code",
+    "stripe_verification_pending",
+    "stripe_status_updated_at",
+  ];
+  if (req.user?._authType !== "admin") {
+    for (const field of serverManagedStripeFields) {
+      delete req.body[field];
+    }
+  }
   let { type, password, email, new_email } = req.body;
   if (type == "change_email") {
     try {

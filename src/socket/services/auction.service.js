@@ -5,7 +5,12 @@ const roomsModel = require("../../models/room");
 const userModel = require("../../models/user");
 const { getAuctionPopulateOptions, startRunningTimer } = require("../../shared/functions");
 const { startRecording } = require("../../shared/livekit");
-const { checkSellerProfileComplete, incompleteProfileResponse } = require("../../shared/sellerProfile");
+const {
+    checkSellerProfileComplete,
+    checkSellerStripeActive,
+    incompleteProfileResponse,
+    stripeRestrictionResponse
+} = require("../../shared/sellerProfile");
 
 async function startAuction(io, socket, data) {
     const { roomId, auction, increaseBidBy } = data;
@@ -27,6 +32,20 @@ async function startAuction(io, socket, data) {
     const profileStatus = checkSellerProfileComplete(seller);
     if (!profileStatus.complete) {
         socket.emit("auction-error", incompleteProfileResponse(profileStatus.missing_fields));
+        return;
+    }
+    try {
+        const stripeStatus = await checkSellerStripeActive(seller);
+        if (!stripeStatus.active) {
+            socket.emit("auction-error", stripeRestrictionResponse(stripeStatus));
+            return;
+        }
+    } catch (error) {
+        console.error("Unable to verify seller Stripe status before auction", error);
+        socket.emit("auction-error", {
+            code: "SELLER_STRIPE_STATUS_UNAVAILABLE",
+            message: "Unable to verify seller Stripe account status. Please try again."
+        });
         return;
     }
     const populateOptions = await getAuctionPopulateOptions();

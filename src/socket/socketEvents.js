@@ -17,7 +17,12 @@ const {
   auctionTimers,createGiveawaOrder
 } = require("../shared/functions");
 const { startRecording } = require("../shared/livekit");
-const { checkSellerProfileComplete, incompleteProfileResponse } = require("../shared/sellerProfile");
+const {
+  checkSellerProfileComplete,
+  checkSellerStripeActive,
+  incompleteProfileResponse,
+  stripeRestrictionResponse
+} = require("../shared/sellerProfile");
 
 function auctionPaymentErrorPayload(err, auctionId) {
   const paymentError = err?.paymentError || err?.error || err;
@@ -51,6 +56,41 @@ function auctionPaymentErrorPayload(err, auctionId) {
     userId: err?.userId || null,
     paymentIntentId: paymentError?.paymentIntentId || err?.paymentIntentId || null
   };
+}
+
+async function requireActiveSellerForSocket(socket, eventName, userId) {
+  const seller = userId
+    ? await userModel.findById(userId).select("seller seller_application stripe_account")
+    : null;
+  if (!seller || !seller.seller || (seller?.seller_application?.status && seller.seller_application.status !== "approved")) {
+    socket.emit(eventName, {
+      code: "SELLER_NOT_APPROVED",
+      message: "Seller approval is required before continuing."
+    });
+    return false;
+  }
+
+  const profileStatus = checkSellerProfileComplete(seller);
+  if (!profileStatus.complete) {
+    socket.emit(eventName, incompleteProfileResponse(profileStatus.missing_fields));
+    return false;
+  }
+
+  try {
+    const stripeStatus = await checkSellerStripeActive(seller);
+    if (!stripeStatus.active) {
+      socket.emit(eventName, stripeRestrictionResponse(stripeStatus));
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error("Unable to verify seller Stripe status", error);
+    socket.emit(eventName, {
+      code: "SELLER_STRIPE_STATUS_UNAVAILABLE",
+      message: "Unable to verify seller Stripe account status. Please try again."
+    });
+    return false;
+  }
 }
 
 
@@ -210,19 +250,7 @@ module.exports = (io) => {
           const productDoc = await productModel.findById(product).select("ownerId");
           ownerId = productDoc?.ownerId;
         }
-        const seller = ownerId
-          ? await userModel.findById(ownerId).select("seller seller_application stripe_account")
-          : null;
-        if (!seller || !seller.seller || (seller?.seller_application?.status && seller.seller_application.status !== "approved")) {
-          return socket.emit("auction-error", {
-            code: "SELLER_NOT_APPROVED",
-            message: "Seller approval is required before continuing.",
-          });
-        }
-        const profileStatus = checkSellerProfileComplete(seller);
-        if (!profileStatus.complete) {
-          return socket.emit("auction-error", incompleteProfileResponse(profileStatus.missing_fields));
-        }
+        if (!await requireActiveSellerForSocket(socket, "auction-error", ownerId)) return;
         const populateOptions = await getAuctionPopulateOptions();
         const duration = auction.duration || 60; 
         const endTime = Date.now() + duration * 1000; 
@@ -373,6 +401,10 @@ module.exports = (io) => {
           data,
         });
         const { tokshow, product, pinned } = data;
+        if (pinned !== false) {
+          const productOwner = await productModel.findById(product).select("ownerId");
+          if (!await requireActiveSellerForSocket(socket, "product-error", productOwner?.ownerId)) return;
+        }
         const populateOptions = await populateRoomOptions();
         let room;
         if (pinned == false) {
@@ -415,6 +447,11 @@ module.exports = (io) => {
           data,
         });
         const { tokshow, auction } = data;
+        const auctionOwner = await auctionModel.findById(auction).populate({
+          path: "product",
+          select: "ownerId"
+        });
+        if (!await requireActiveSellerForSocket(socket, "auction-error", auctionOwner?.product?.ownerId)) return;
         const populateOptions = await getAuctionPopulateOptions();
         await roomsModel.findOneAndUpdate(
           { _id: tokshow },
@@ -747,6 +784,8 @@ module.exports = (io) => {
       duration,
       buyLimit,originalPrice
     }) => {
+      const productOwner = await productModel.findById(productId).select("ownerId");
+      if (!await requireActiveSellerForSocket(socket, "product-error", productOwner?.ownerId)) return;
       const endTime = Date.now() + duration * 1000;
       console.log({
       productId,

@@ -22,6 +22,12 @@ const logsModel = require("../models/activity_logs");
 const { stopEgress } = require("./livekit");
 const { sendPushNotification } = require("./send_notification");
 const emailTemplates = require("../models/templates");
+const {
+  checkSellerStripeActive,
+  getStripeAccountStatus,
+  getStripeAccountStatusCode,
+  stripeRestrictionResponse
+} = require("./sellerProfile");
 function getOrderPopulates() {
   return [
     {
@@ -174,6 +180,36 @@ async function createOrder({
 }) {
   const orderId = new mongoose.Types.ObjectId();
   const itemId = new mongoose.Types.ObjectId();
+
+  const sellerAccount = await userModel.findById(seller).select("stripe_account");
+  try {
+    const stripeStatus = await checkSellerStripeActive(sellerAccount);
+    if (!stripeStatus.active) {
+      const paymentError = stripeRestrictionResponse(stripeStatus);
+      return {
+        success: false,
+        retryable: false,
+        error: paymentError,
+        paymentError
+      };
+    }
+  } catch (error) {
+    console.error("Unable to verify seller Stripe status before payment", {
+      sellerId: seller?.toString(),
+      message: error.message,
+      stack: error.stack
+    });
+    const paymentError = {
+      code: "SELLER_STRIPE_STATUS_UNAVAILABLE",
+      message: "Unable to verify seller Stripe account status. Please try again."
+    };
+    return {
+      success: false,
+      retryable: true,
+      error: paymentError,
+      paymentError
+    };
+  }
 
   // ================= SETTINGS & FEES =================
   const response = await getSettings();
@@ -486,6 +522,31 @@ async function retryOrderPayment(orderId) {
       error: "Retry limit exceeded"
     };
   }
+
+  const sellerAccount = await userModel.findById(order.seller).select("stripe_account");
+  try {
+    const stripeStatus = await checkSellerStripeActive(sellerAccount);
+    if (!stripeStatus.active) {
+      return {
+        success: false,
+        retryable: false,
+        ...stripeRestrictionResponse(stripeStatus)
+      };
+    }
+  } catch (error) {
+    console.error("Unable to verify seller Stripe status before retry payment", {
+      sellerId: order.seller?.toString(),
+      message: error.message,
+      stack: error.stack
+    });
+    return {
+      success: false,
+      retryable: true,
+      code: "SELLER_STRIPE_STATUS_UNAVAILABLE",
+      error: "Unable to verify seller Stripe account status. Please try again."
+    };
+  }
+
   // 4️⃣ Get payment method
 
   // 1️⃣ Recalculate bundle + shipping
@@ -1414,6 +1475,23 @@ const stripeConnect = async (
   applying
 ) => {
   var response = await getSettings();
+  if (!response) {
+    return {
+      success: false,
+      code: "STRIPE_CONFIGURATION_UNAVAILABLE",
+      error: "Stripe configuration is unavailable",
+    };
+  }
+  if (
+    response.demoMode === true &&
+    String(response.stripeSecretKey || "").startsWith("sk_live_")
+  ) {
+    return {
+      success: false,
+      code: "DEMO_MODE_LIVE_STRIPE_FORBIDDEN",
+      error: "Demo mode cannot create test seller data with a live Stripe key",
+    };
+  }
   if (response["demoMode"] === true) {
     payload = {
       country: "US",
@@ -1458,27 +1536,55 @@ const stripeConnect = async (
     };
   }
 
-  var response = await getSettings();
-  if (response["stripeSecretKey"] === "") {
+  if (!response["stripeSecretKey"]) {
     return { error: "Stripe secret key not found in the admin setings", success: false };
   }
   const stripe = require("stripe")(response["stripeSecretKey"]);
   try {
-    const account = await stripe.accounts.create(payload);
-    console.log(payload)
+    const account = await stripe.accounts.create(payload, {
+      idempotencyKey: `seller-connect-${userId}`,
+    });
     if (account["external_accounts"]) {
       let data = account["external_accounts"]["data"];
       await bank.deleteMany({ userid: userId });
-      var response = await getSettings();
-      await userModel.findByIdAndUpdate(userId, {
-        $set: { stripe_account: account["id"], applied_seller: true, }
+      const stripeStatus = getStripeAccountStatus(account);
+      const statusCode = getStripeAccountStatusCode(stripeStatus);
+      const updatedUser = await userModel.findByIdAndUpdate(userId, {
+        $set: {
+          stripe_account: account["id"],
+          applied_seller: true,
+          stripe_status_code: statusCode,
+          stripe_verification_pending: stripeStatus.verification_pending,
+          stripe_status_updated_at: new Date(),
+        }
       });
-      return { success: true, bank: data[0] };
+      if (!updatedUser) {
+        return {
+          success: false,
+          code: "USER_NOT_FOUND",
+          error: "User not found after Stripe account creation",
+        };
+      }
+      return {
+        success: true,
+        account_created: true,
+        account_id: account.id,
+        can_sell: stripeStatus.can_sell,
+        onboarding_required: stripeStatus.onboarding_required,
+        verification_pending: stripeStatus.verification_pending,
+        code: statusCode,
+        stripe_status: stripeStatus,
+        bank: data[0],
+      };
     } else {
       return { error: "error creating stripe account", success: false };
     }
   } catch (error) {
-    return { error: error?.raw?.message, success: false };
+    return {
+      success: false,
+      code: error?.code || "STRIPE_ACCOUNT_CREATION_FAILED",
+      error: error?.raw?.message || error?.message || "Unable to create Stripe account",
+    };
   }
 };
 const createGiveawaOrder = async (giveaway) => {

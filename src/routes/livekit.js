@@ -8,6 +8,7 @@ const itemModel = require("../models/item");
 const router = express.Router();
 const fs = require("fs");
 const roomModel = require("../models/room");
+const { requireSellerProfileCompleteByUserId } = require("../shared/sellerProfile");
 const path = require("path");
 const recordingsDir = path.join(__dirname, "../recordings");
 if (!fs.existsSync(recordingsDir)) {
@@ -54,6 +55,13 @@ router.post("/token/dynamic", async (req, res) => {
     let canPublish = false;
     
     let show = await roomModel.findById(room);
+    const isHost =
+      show?.owner?.toString() === userId ||
+      userId === show?.co_host?.toString();
+    if (isHost) {
+      const sellerProfile = await requireSellerProfileCompleteByUserId(res, show?.owner);
+      if (!sellerProfile.ok) return;
+    }
     if (show?.owner?.toString() === userId) {
       if ((show.activeCameraSessionId == "" || !show.activeCameraSessionId) && show?.owner?.toString() === userId) {
         console.log("🎉 Setting activeCameraSessionId for show:", show._id);

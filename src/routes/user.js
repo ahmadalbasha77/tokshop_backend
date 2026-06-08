@@ -33,6 +33,10 @@ userRouter
   .post(userController.submitSellerApplication);
 
 userRouter
+  .route("/seller/eligibility/:userId")
+  .get(userController.getSellerEligibility);
+
+userRouter
   .route("/:userId")
   .get(
     // passport.authenticate("jwt", { session: false }),

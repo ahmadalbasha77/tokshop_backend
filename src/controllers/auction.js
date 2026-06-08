@@ -36,6 +36,13 @@ exports.getAuctions = async (req, res, next) => {
 
 exports.createAuction = async (req, res, next) => {
   const auctionProduct = await product.findById(req.body.product).select("ownerId");
+  if (!auctionProduct) {
+    return res.status(404).json({
+      success: false,
+      code: "PRODUCT_NOT_FOUND",
+      message: "Product not found",
+    });
+  }
   const sellerProfile = await requireSellerProfileCompleteByUserId(res, auctionProduct?.ownerId);
   if (!sellerProfile.ok) return;
 
@@ -59,6 +66,24 @@ exports.createAuction = async (req, res, next) => {
 
 exports.updateAuction = async (req, res, next) => {
   console.log(req.body, req.params.id);
+  if (req.body?.pinned === true || req.body?.started === true) {
+    const existingAuction = await auctionModel.findById(req.params.id).populate({
+      path: "product",
+      select: "ownerId"
+    });
+    if (!existingAuction) {
+      return res.status(404).json({
+        success: false,
+        code: "AUCTION_NOT_FOUND",
+        message: "Auction not found",
+      });
+    }
+    const sellerProfile = await requireSellerProfileCompleteByUserId(
+      res,
+      existingAuction?.product?.ownerId
+    );
+    if (!sellerProfile.ok) return;
+  }
   if (req.body?.pinned == true) {
     await roomsModel.findByIdAndUpdate(
       req.body.tokshow,

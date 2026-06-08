@@ -6,6 +6,9 @@ stripeRouter
   .post(stripeController.stripePayoutPayments);
 stripeRouter.route("/connect/:id").post(stripeController.connect);
 stripeRouter
+  .route("/connect/:id/onboarding-link")
+  .post(stripeController.createConnectOnboardingLink);
+stripeRouter
   .route("/transactions/:userId")
   .get(stripeController.payoutTransactions);
 stripeRouter

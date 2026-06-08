@@ -3,7 +3,8 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "start": "nodemon ./bin/www"
+    "start": "nodemon ./bin/www",
+    "test": "node test/stripeAccountStatus.test.js"
   },
   "dependencies": {
     "@onesignal/node-onesignal": "^1.0.0-beta4",

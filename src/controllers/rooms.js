@@ -392,6 +392,25 @@ exports.makeRoomFeatured = async (req, res) => {
 
 exports.updateRoomById = async (req, res) => {
   try {
+    const createsOrStartsShow =
+      req.body.started === true ||
+      (req.body.repeat && req.body.repeat !== "none");
+    if (createsOrStartsShow) {
+      const existingRoom = await roomsModel.findById(req.params.roomId).select("owner");
+      if (!existingRoom) {
+        return res.status(404).json({
+          success: false,
+          code: "ROOM_NOT_FOUND",
+          message: "Room not found",
+        });
+      }
+      const sellerProfile = await requireSellerProfileCompleteByUserId(
+        res,
+        existingRoom.owner
+      );
+      if (!sellerProfile.ok) return;
+    }
+
     let newObj = {
       owner: new mongoose.Types.ObjectId(req.body.userId),
       hosts: req.params.hosts ? req.params.hosts : [],

@@ -9,8 +9,12 @@ const { parsePhoneNumberFromString } = require("libphonenumber-js");
 const transactionModel = require("../models/transaction");
 const { sendEmail } = require("../shared/email");
 const {
+  checkSellerStripeActive,
   checkSellerProfileComplete,
+  getStripeAccountStatus,
+  getStripeAccountStatusCode,
   sendIncompleteProfileResponse,
+  stripeRestrictionResponse,
 } = require("../shared/sellerProfile");
 
 var mongoose = require("mongoose");
@@ -30,6 +34,99 @@ const normalizeStripeCountryCode = (countryCode, country) => {
   if (aliases[compactValue]) return aliases[compactValue];
   if (/^[A-Z]{2}$/.test(compactValue)) return compactValue;
   return "";
+};
+
+const canManageStripeAccount = (req, userId) =>
+  req.user?._authType === "admin" ||
+  req.user?._id?.toString() === userId?.toString();
+
+const sendStripeAccountAccessDenied = (res) =>
+  res.status(403).json({
+    success: false,
+    code: "STRIPE_ACCOUNT_ACCESS_DENIED",
+    message: "You cannot manage another user's Stripe account.",
+  });
+
+const getAllowedOnboardingHosts = () => {
+  const configuredHosts = String(
+    process.env.STRIPE_ONBOARDING_ALLOWED_HOSTS || ""
+  )
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+
+  return new Set([
+    "tokshoplive.com",
+    "www.tokshoplive.com",
+    "iconaapp.com",
+    "www.iconaapp.com",
+    ...configuredHosts,
+  ]);
+};
+
+const isAllowedOnboardingUrl = (value, expectedPath) => {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    const isLocalhost = ["localhost", "127.0.0.1"].includes(hostname);
+    const validProtocol =
+      url.protocol === "https:" ||
+      (url.protocol === "http:" && isLocalhost);
+    const normalizedPath =
+      url.pathname.replace(/\/+$/, "") || "/";
+
+    return (
+      validProtocol &&
+      !url.username &&
+      !url.password &&
+      (isLocalhost || getAllowedOnboardingHosts().has(hostname)) &&
+      normalizedPath === expectedPath
+    );
+  } catch {
+    return false;
+  }
+};
+
+const createStripeOnboardingLink = async ({
+  stripe,
+  accountId,
+  refreshUrl,
+  returnUrl,
+}) =>
+  stripe.accountLinks.create({
+    account: accountId,
+    refresh_url: refreshUrl,
+    return_url: returnUrl,
+    type: "account_onboarding",
+    collection_options: {
+      fields: "eventually_due",
+      future_requirements: "include",
+    },
+  });
+
+const requireActiveSellerStripe = async (res, user) => {
+  try {
+    const stripeStatus = await checkSellerStripeActive(user);
+    if (!stripeStatus.active) {
+      res.status(403).json(stripeRestrictionResponse(stripeStatus));
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error("Unable to verify seller Stripe status", {
+      userId: user?._id?.toString(),
+      stripeAccount: user?.stripe_account,
+      code: error.code,
+      message: error.message,
+    });
+    res.status(503).json({
+      success: false,
+      can_sell: false,
+      code: "SELLER_STRIPE_STATUS_UNAVAILABLE",
+      message: "Unable to verify seller Stripe account status. Please try again.",
+    });
+    return false;
+  }
 };
 
 exports.getRevenue = async (req, res) => {
@@ -333,6 +430,9 @@ exports.getRefunds = async (req, res) => {
   }
 };
 exports.getStripeBankAccount = async (req, res) => {
+  if (!canManageStripeAccount(req, req.params.userId)) {
+    return sendStripeAccountAccessDenied(res);
+  }
   var response = await functions.getSettings();
   const stripe = require("stripe")(response["stripeSecretKey"]);
 
@@ -364,20 +464,22 @@ exports.getStripeBankAccount = async (req, res) => {
 
 exports.stripeTransfer = async (req, res) => {
   let { amount, user } = req.body;
-  console.log(req.body);
-  if (!amount) {
-    return res.status(500).json({
-      response: "Amount is required",
-      status: false,
-    });
-  }
   if (!user) {
-    return res.status(500).json({
+    return res.status(400).json({
       response: "User is required",
       status: false,
     });
   }
-
+  if (!canManageStripeAccount(req, user)) {
+    return sendStripeAccountAccessDenied(res);
+  }
+  amount = Number(amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return res.status(400).json({
+      response: "Amount must be a positive number",
+      status: false,
+    });
+  }
   let payoutdata = await userModel.findById(user);
   if (!payoutdata) {
     return res.status(404).json({ success: false, message: "User not found" });
@@ -386,6 +488,7 @@ exports.stripeTransfer = async (req, res) => {
   if (!profileStatus.complete) {
     return sendIncompleteProfileResponse(res, profileStatus.missing_fields);
   }
+  if (!(await requireActiveSellerStripe(res, payoutdata))) return;
 
   const todayStart = new Date("2026-02-26T00:00:00.000Z").getTime();
   let transaction = await transactionModel.find({
@@ -398,7 +501,6 @@ exports.stripeTransfer = async (req, res) => {
     chargeId: { $exists: true },
     availableOn: { $gte: todayStart, $lte: Date.now() }
   }).select("amount _id");
-  console.log(transaction);
   if (transaction.length == 0) {
     return res.status(500).json({
       response: "No transactions found",
@@ -407,8 +509,6 @@ exports.stripeTransfer = async (req, res) => {
   }
 
   let total = Number(transaction.reduce((sum, t) => sum + t.amount, 0).toFixed(0));
-  console.log(total);
-  console.log(amount.toFixed(0));
   let ids = transaction.map((t) => t._id);
   
   if (total != Number(amount.toFixed(0))) {
@@ -417,8 +517,7 @@ exports.stripeTransfer = async (req, res) => {
       status: false,
     });
   }
-  let originalAmount = Number(req.body.amount.toFixed(2)); //1458.85
-  console.log(originalAmount);
+  let originalAmount = Number(amount.toFixed(2)); //1458.85
 
 
 
@@ -448,13 +547,10 @@ exports.stripeTransfer = async (req, res) => {
     )
     const owed = Math.min(0, payoutdata.wallet || 0);
     const netAmount = originalAmount + owed;
-    console.log("netAmount", netAmount);
     let transfer;
     if (netAmount > 0) {
       let stripeamount = Math.round(netAmount * 100);
-      // console.log(payoutdata);
       let stripe_account = payoutdata["stripe_account"];
-      console.log(originalAmount, stripeamount, stripe_account);
       if (stripe_account == null) {
         await userModel.updateOne(
           { _id: user },
@@ -474,7 +570,6 @@ exports.stripeTransfer = async (req, res) => {
         currency: "usd",
         destination: stripe_account,
       }, { idempotencyKey });
-      console.log(transfer);
       if (transfer?.status == false) {
         await transactionModel.create({
           from: null,
@@ -544,7 +639,9 @@ exports.stripeTransfer = async (req, res) => {
 };
 
 exports.stripePayoutPayments = async (req, res) => {
-  console.log(req.body);
+  if (!canManageStripeAccount(req, req.params.userId)) {
+    return sendStripeAccountAccessDenied(res);
+  }
   let payoutdata = await userModel.findById(req.params.userId);
   if (!payoutdata) {
     return res.status(404).json({ success: false, message: "User not found" });
@@ -553,20 +650,25 @@ exports.stripePayoutPayments = async (req, res) => {
   if (!profileStatus.complete) {
     return sendIncompleteProfileResponse(res, profileStatus.missing_fields);
   }
+  if (!(await requireActiveSellerStripe(res, payoutdata))) return;
   let stripe_account = payoutdata["stripe_account"];
-  console.log(stripe_account);
   // return res.json({ banks: [], status: false });
   if (stripe_account == null) {
     return res.json({ banks: [], status: false });
   }
-  const amount = Number(req.body.amount) || 0;
+  const amount = Number(req.body.amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return res.status(400).json({
+      status: false,
+      error: "Amount must be a positive number",
+    });
+  }
   var response = await functions.getSettings();
   const stripe = require("stripe")(response["stripeSecretKey"]);
   const account = await stripe.accounts.retrieve(stripe_account);
   // console.log(account);
   try {
     let banks = account["external_accounts"]["data"];
-    console.log(banks);
 
     const userres = await userModel.findOneAndUpdate(
       {
@@ -722,18 +824,69 @@ exports.connect = async (req, res) => {
     ssn_last_4,
     year, countryCode, applying, create_address, iban = null, url = 'https://iconaapp.com', mcc = '5999'
   } = req.body;
-  console.log(req.body);
-  const user = await userModel.findById(req.params.id).select("seller seller_application");
+  if (!canManageStripeAccount(req, req.params.id)) {
+    return res.status(403).json({
+      success: false,
+      code: "STRIPE_ACCOUNT_ACCESS_DENIED",
+      message: "You cannot manage another user's Stripe account.",
+    });
+  }
+
+  const user = await userModel
+    .findById(req.params.id)
+    .select("seller seller_application stripe_account");
   if (!user) {
     return res.status(404).json({ success: false, message: "User not found" });
   }
-  if (!user.seller && user?.seller_application?.status !== "approved") {
+  const sellerStatus = user?.seller_application?.status;
+  if (!user.seller || (sellerStatus && sellerStatus !== "approved")) {
     return res.status(403).json({
       success: false,
       code: "SELLER_NOT_APPROVED",
       message: "Seller approval is required before completing payout setup.",
     });
   }
+
+  var settings = await functions.getSettings();
+  if (!settings?.stripeSecretKey) {
+    return res.status(503).json({
+      success: false,
+      code: "STRIPE_CONFIGURATION_UNAVAILABLE",
+      error: "Stripe configuration is unavailable.",
+    });
+  }
+  const stripe = require("stripe")(settings.stripeSecretKey);
+
+  if (user.stripe_account) {
+    try {
+      const existingAccount = await stripe.accounts.retrieve(user.stripe_account);
+      const stripeStatus = getStripeAccountStatus(existingAccount);
+      return res.json({
+        success: true,
+        account_created: false,
+        account_id: existingAccount.id,
+        can_sell: stripeStatus.can_sell,
+        onboarding_required: stripeStatus.onboarding_required,
+        verification_pending: stripeStatus.verification_pending,
+        code: getStripeAccountStatusCode(stripeStatus),
+        stripe_status: stripeStatus,
+      });
+    } catch (error) {
+      console.error("Unable to retrieve existing Stripe account", {
+        userId: req.params.id,
+        stripeAccount: user.stripe_account,
+        code: error.code,
+        type: error.type,
+        message: error.message,
+      });
+      return res.status(502).json({
+        success: false,
+        code: "STRIPE_ACCOUNT_RETRIEVAL_FAILED",
+        error: "Unable to retrieve the existing Stripe account.",
+      });
+    }
+  }
+
   countryCode = normalizeStripeCountryCode(countryCode, country);
   if (!countryCode) {
     return res.status(400).json({
@@ -741,6 +894,18 @@ exports.connect = async (req, res) => {
       error: "Country code must be a 2-character ISO code, such as US, EG, or GB.",
     });
   }
+  if (
+    countryCode === "US" &&
+    (!/^\d{4}$/.test(String(ssn_last_4 || "")) ||
+      String(ssn_last_4) === "0000")
+  ) {
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_SSN_LAST_4",
+      error: "ssn_last_4 must contain the last 4 digits of the SSN.",
+    });
+  }
+
   // if (create_address == true) {
   const phoneNumber = parsePhoneNumberFromString(phone, countryCode);
 
@@ -770,11 +935,6 @@ exports.connect = async (req, res) => {
     business_profile: {
       url,
       mcc,
-    },
-
-    tos_acceptance: {
-      date: Math.floor(Date.now() / 1000),
-      ip: req.ip,
     },
 
     individual: {
@@ -821,7 +981,9 @@ exports.connect = async (req, res) => {
     email,
     applying
   );
-  console.log(account);
+  if (!account?.success) {
+    return res.status(400).json(account);
+  }
   if (create_address == true) {
     const newAddress = await addressModel.create({
       name: first_name,
@@ -839,6 +1001,116 @@ exports.connect = async (req, res) => {
     await userModel.findByIdAndUpdate(req.params.id, { address: newAddress?._id })
   }
   return res.json(account);
+};
+
+exports.createConnectOnboardingLink = async (req, res) => {
+  try {
+    const userId = req.params.id;
+    if (!canManageStripeAccount(req, userId)) {
+      return res.status(403).json({
+        success: false,
+        code: "STRIPE_ACCOUNT_ACCESS_DENIED",
+        message: "You cannot manage another user's Stripe account.",
+      });
+    }
+
+    const { refresh_url, return_url } = req.body;
+    if (
+      !isAllowedOnboardingUrl(refresh_url, "/stripe/refresh") ||
+      !isAllowedOnboardingUrl(return_url, "/stripe/return")
+    ) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_ONBOARDING_URL",
+        message:
+          "Stripe onboarding URLs must use an approved app domain and path.",
+      });
+    }
+
+    const user = await userModel
+      .findById(userId)
+      .select("seller seller_application stripe_account");
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        code: "USER_NOT_FOUND",
+        message: "User not found",
+      });
+    }
+    const sellerStatus = user?.seller_application?.status;
+    if (!user.seller || (sellerStatus && sellerStatus !== "approved")) {
+      return res.status(403).json({
+        success: false,
+        code: "SELLER_NOT_APPROVED",
+        message: "Seller approval is required before completing Stripe onboarding.",
+      });
+    }
+    if (!user.stripe_account) {
+      return res.status(409).json({
+        success: false,
+        code: "STRIPE_ACCOUNT_MISSING",
+        message: "Create the seller Stripe account before requesting onboarding.",
+      });
+    }
+
+    const settings = await functions.getSettings();
+    if (!settings?.stripeSecretKey) {
+      return res.status(503).json({
+        success: false,
+        code: "STRIPE_CONFIGURATION_UNAVAILABLE",
+        message: "Stripe configuration is unavailable.",
+      });
+    }
+    const stripe = require("stripe")(settings.stripeSecretKey);
+    const account = await stripe.accounts.retrieve(user.stripe_account);
+    const stripeStatus = getStripeAccountStatus(account);
+
+    if (!stripeStatus.onboarding_required) {
+      const code = getStripeAccountStatusCode(stripeStatus);
+      return res.json({
+        success: true,
+        can_sell: stripeStatus.can_sell,
+        onboarding_required: false,
+        verification_pending: stripeStatus.verification_pending,
+        code,
+        message: stripeStatus.verification_pending
+          ? "Your identity document was submitted and is being reviewed by Stripe."
+          : undefined,
+        stripe_status: stripeStatus,
+      });
+    }
+
+    const accountLink = await createStripeOnboardingLink({
+      stripe,
+      accountId: user.stripe_account,
+      refreshUrl: refresh_url,
+      returnUrl: return_url,
+    });
+
+    return res.json({
+      success: true,
+      can_sell: false,
+      onboarding_required: true,
+      verification_pending: stripeStatus.verification_pending,
+      code: "STRIPE_ONBOARDING_REQUIRED",
+      url: accountLink.url,
+      expires_at: accountLink.expires_at,
+      stripe_status: stripeStatus,
+    });
+  } catch (error) {
+    console.error("Unable to create Stripe onboarding link", {
+      userId: req.params.id,
+      code: error.code,
+      type: error.type,
+      message: error.message,
+      stack: error.stack,
+    });
+    return res.status(502).json({
+      success: false,
+      code: "STRIPE_ONBOARDING_LINK_FAILED",
+      message: "Unable to start Stripe onboarding. Please try again.",
+    });
+  }
 };
 async function createCustomer(email, stripe) {
   const customer = await stripe.customers.create({
@@ -993,7 +1265,6 @@ exports.deletePaymentMethod = async (req, res) => {
 exports.setDefaultPaymentMethod = async (req, res) => {
   try {
     const { userid, paymentMethodId } = req.body;
-    console.log(req.body);
 
     // Remove primary flag from all user's payment methods
     await paymentmethodModel.updateMany(
@@ -1078,6 +1349,9 @@ exports.allPayoutTransactions = async (req, res) => {
 
 exports.payoutTransactions = async (req, res) => {
   try {
+    if (!canManageStripeAccount(req, req.params.userId)) {
+      return sendStripeAccountAccessDenied(res);
+    }
     var response = await functions.getSettings();
     const stripe = require("stripe")(response["stripeSecretKey"]);
     let user = await userModel.findById(req.params.userId);
@@ -1088,7 +1362,6 @@ exports.payoutTransactions = async (req, res) => {
       const profileStatus = checkSellerProfileComplete(user);
       return sendIncompleteProfileResponse(res, profileStatus.missing_fields);
     }
-    console.log(user?.stripe_account);
     const payout = await stripe.payouts.list(
       { limit: 20, expand: ["data.destination"] },
       { stripeAccount: user?.stripe_account }

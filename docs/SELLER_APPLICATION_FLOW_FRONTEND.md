@@ -347,13 +347,158 @@ Required fields remain the existing payout/KYC fields expected by Stripe Connect
   "day": 10,
   "month": 10,
   "year": 1985,
-  "ssn_last_4": "0000",
+  "ssn_last_4": "6789",
   "countryCode": "US",
   "create_address": false
 }
 ```
 
 For non-US sellers, the existing endpoint supports `iban` and `countryCode`.
+
+The response can contain:
+
+```json
+{
+  "success": true,
+  "account_created": true,
+  "can_sell": false,
+  "onboarding_required": true,
+  "code": "STRIPE_ONBOARDING_REQUIRED",
+  "stripe_status": {
+    "ready": false,
+    "can_sell": false,
+    "onboarding_required": true,
+    "verification_pending": false,
+    "charges_enabled": false,
+    "payouts_enabled": false,
+    "card_payments": "pending",
+    "transfers": "pending",
+    "legacy_payments": "inactive",
+    "currently_due": ["individual.id_number"],
+    "pending_verification": []
+  }
+}
+```
+
+`success: true` means that the Stripe account exists. It does not mean the
+account is approved to sell.
+
+If `code == STRIPE_FUTURE_REQUIREMENTS_PENDING`, the account can currently be
+eligible to sell, but Stripe has future verification information available for
+collection. Flutter should still open onboarding when
+`onboarding_required == true` to prevent a later restriction.
+
+When `onboarding_required` is true, request a single-use Stripe-hosted
+onboarding link:
+
+`POST /stripe/connect/:id/onboarding-link`
+
+```json
+{
+  "refresh_url": "https://tokshoplive.com/stripe/refresh",
+  "return_url": "https://tokshoplive.com/stripe/return"
+}
+```
+
+Open the returned `url` in a standalone browser, not an embedded WebView. After
+Stripe returns to the app, call:
+
+`GET /users/seller/eligibility/:userId`
+
+Only allow selling when:
+
+```text
+can_sell == true
+onboarding_required == false
+verification_pending == false
+```
+
+The authenticated user ID must match `:userId` unless the caller is an admin.
+Account Link URLs are single-use. If Stripe redirects to `refresh_url`, Flutter
+must request a new onboarding link and open the new URL.
+
+## Automatic Stripe Onboarding After Bank Setup
+
+Do not add a separate confirmation step after the seller submits bank and KYC
+information.
+
+Use this flow:
+
+1. Call `POST /stripe/connect/:id`.
+2. Read `onboarding_required`, `verification_pending`, and `stripe_status`.
+3. If `onboarding_required == true`, immediately request a fresh account link
+   from `POST /stripe/connect/:id/onboarding-link`.
+4. Open the returned URL in a standalone browser.
+5. When Stripe returns to `/stripe/return`, call the eligibility endpoint
+   again.
+6. If Stripe redirects to `/stripe/refresh`, request a new account link. Never
+   reuse the previous URL.
+
+Stripe decides which missing information to display. With
+`fields=eventually_due` and `future_requirements=include`, the hosted form can
+collect identity documents and other future requirements before they interrupt
+payouts.
+
+## Identity Document Under Review
+
+When Stripe has received a document and is reviewing it, the eligibility or
+Stripe response contains:
+
+```json
+{
+  "success": false,
+  "can_sell": false,
+  "code": "STRIPE_VERIFICATION_PENDING",
+  "message": "Your identity document was submitted and is being reviewed by Stripe.",
+  "onboarding_required": false,
+  "verification_pending": true,
+  "stripe_status": {
+    "ready": false,
+    "can_sell": false,
+    "onboarding_required": false,
+    "verification_pending": true,
+    "currently_due": [],
+    "past_due": [],
+    "eventually_due": ["individual.verification.document"],
+    "pending_verification": ["individual.verification.document"],
+    "errors": []
+  }
+}
+```
+
+Flutter behavior:
+
+- Do not open another onboarding link automatically.
+- Show a non-success state such as "Your identity document is under review."
+- Keep product, live, and auction creation blocked.
+- Provide a "Check status" action that calls seller eligibility again.
+
+If another requirement remains actionable while the document is under review,
+`onboarding_required` remains `true`. In that case Flutter should open a new
+onboarding link so the seller can complete the other requirement.
+
+## Stripe Requirement Errors
+
+`stripe_status.errors` and `stripe_status.future_requirements.errors` contain
+Stripe requirement failures, such as an unreadable or expired document.
+
+When `onboarding_required == true`, open hosted onboarding and let Stripe show
+the corrective action. Do not display raw Stripe errors directly unless they
+are mapped to safe, localized Flutter messages.
+
+## Stripe Account Updated Webhook
+
+The backend handles Stripe `account.updated` and stores a non-sensitive summary
+on the user:
+
+- `stripe_status_code`
+- `stripe_verification_pending`
+- `stripe_status_updated_at`
+
+The Stripe Dashboard webhook configuration must include `account.updated` for
+connected accounts. The live Stripe Account remains the source of truth;
+Flutter must still call seller eligibility after returning from Stripe and
+before a protected seller action.
 
 If seller is not approved yet, backend returns:
 
@@ -406,11 +551,15 @@ Suggested UI behavior:
 - `seller_application.status == pending`: show "Application under review".
 - `seller_application.status == rejected`: show rejected state and allow resubmit if product wants that.
 - `seller == true` and `stripe_account == null`: show seller dashboard but gate payout-required actions with "Complete seller account".
-- `seller == true` and `stripe_account != null`: seller profile is payout-ready.
+- `seller == true` and `stripe_account != null`: Stripe account exists, but it
+  is not necessarily payout-ready. Use the seller eligibility endpoint and
+  require `can_sell == true`.
 
 ## Backward Compatibility Notes
 
-Existing sellers with `stripe_account` should continue using product/live/auction/payout flows.
+Existing sellers with an active Stripe account continue using
+product/live/auction/payout flows. Restricted accounts are sent to Stripe
+onboarding instead of being allowed to reach a payment failure.
 
 Existing `/stripe/connect/:id` is not removed. It is only repositioned in the app flow.
 

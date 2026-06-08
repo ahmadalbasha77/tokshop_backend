@@ -149,6 +149,18 @@ const user = new Schema(
       type: String,
       default: null,
     },
+    stripe_status_code: {
+      type: String,
+      default: "",
+    },
+    stripe_verification_pending: {
+      type: Boolean,
+      default: false,
+    },
+    stripe_status_updated_at: {
+      type: Date,
+      default: null,
+    },
     bio: { type: String, default: "" },
     logintype: { type: String, default: "" },
     account_type: { type: String, default: "" },

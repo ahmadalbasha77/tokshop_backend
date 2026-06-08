@@ -133,10 +133,6 @@ const acceptOffer = async (req, res) => {
       offer.counterPrice = null;
     }
 
-    offer.status = "accepted";
-    offer.acceptedAt = new Date();
-    await offer.save();
-
     /**
      *  🔹 CREATE ORDER HERE
      */
@@ -171,6 +167,10 @@ const acceptOffer = async (req, res) => {
     }
 
     if (success) {
+      offer.status = "accepted";
+      offer.acceptedAt = new Date();
+      await offer.save();
+
       await Product.findByIdAndUpdate(
         offer.product._id,
         {

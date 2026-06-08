@@ -4,12 +4,45 @@ const { stopEgress } = require("../../shared/livekit");
 const { populateRoomOptions, sendNotification } = require("../../shared/functions");
 const { sendShowAnalyticsEmail } = require("../../shared/sendShowAnalyticsEmail");
 const ThemeSettings = require("../../models/themes")
+const userModel = require("../../models/user");
+const {
+    checkSellerProfileComplete,
+    checkSellerStripeActive,
+    incompleteProfileResponse,
+    stripeRestrictionResponse
+} = require("../../shared/sellerProfile");
 
 module.exports = (io, socket) => {
 
     socket.on("start-room", async (data) => {
         console.log("start-room", data);
         let { roomId, userId } = data;
+        const roomOwner = await roomsModel.findById(roomId).select("owner");
+        const seller = roomOwner?.owner
+            ? await userModel.findById(roomOwner.owner).select("seller seller_application stripe_account")
+            : null;
+        if (!seller || !seller.seller || (seller?.seller_application?.status && seller.seller_application.status !== "approved")) {
+            return socket.emit("room-error", {
+                code: "SELLER_NOT_APPROVED",
+                message: "Seller approval is required before starting a live show."
+            });
+        }
+        const profileStatus = checkSellerProfileComplete(seller);
+        if (!profileStatus.complete) {
+            return socket.emit("room-error", incompleteProfileResponse(profileStatus.missing_fields));
+        }
+        try {
+            const stripeStatus = await checkSellerStripeActive(seller);
+            if (!stripeStatus.active) {
+                return socket.emit("room-error", stripeRestrictionResponse(stripeStatus));
+            }
+        } catch (error) {
+            console.error("Unable to verify seller Stripe status before starting room", error);
+            return socket.emit("room-error", {
+                code: "SELLER_STRIPE_STATUS_UNAVAILABLE",
+                message: "Unable to verify seller Stripe account status. Please try again."
+            });
+        }
         const populateOptions = await populateRoomOptions();
         let room = await roomsModel
             .findByIdAndUpdate(
