@@ -1,6 +1,7 @@
 const functions = require("../shared/functions");
 const transactionModel = require("../models/transaction");
 const userModel = require("../models/user");
+const orderModel = require("../models/order");
 var mongoose = require("mongoose");
 const { sendEmail } = require('../shared/email');
 const {
@@ -239,8 +240,23 @@ async function processClearedTransactions(stripe) {
             { _id: { $in: sellerTxs.map((tx) => tx._id) } },
             { status: "Completed", payment_available: true }
           );
+          const deliveredOrderIds = await orderModel.distinct("_id", {
+            _id: {
+              $in: sellerTxs
+                .map((tx) => tx.orderId)
+                .filter(Boolean),
+            },
+            status: "delivered",
+          });
           let ordertransactions = await transactionModel.find(
-            { _id: { $in: sellerTxs.map((tx) => tx._id) }, order_fulfilled: true, paid_out: false, type: "order" },
+            {
+              _id: { $in: sellerTxs.map((tx) => tx._id) },
+              orderId: { $in: deliveredOrderIds },
+              order_fulfilled: true,
+              payment_available: true,
+              paid_out: false,
+              type: "order",
+            },
           );
           console.log("ordertransactions", seller?._id, ordertransactions)
           if (ordertransactions.length) {
