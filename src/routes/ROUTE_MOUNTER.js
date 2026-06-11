@@ -30,6 +30,8 @@ const roomController = require("../controllers/rooms");
 const requireAdminJson = require("../services/adminJsonAuth");
 const pendingServiceTransactionsController = require("../controllers/pendingServiceTransactions");
 const adminReadController = require("../controllers/adminRead");
+const adminOrderPaymentsController = require("../controllers/adminOrderPayments");
+const adminPayoutsController = require("../controllers/adminPayouts");
 
 require("../services/authenticate");
 
@@ -52,6 +54,11 @@ router.get(
   requireAdminJson,
   adminReadController.verifyAdmin
 );
+router.get(
+  "/admin/stripe-payouts",
+  requireAdminJson,
+  adminPayoutsController.getStripePayouts
+);
 router.get("/users", requireAdminJson, adminReadController.getUsers);
 router.get(
   "/users/stats/all",
@@ -67,6 +74,16 @@ router.get(
   "/orders/stats/all",
   requireAdminJson,
   adminReadController.getOrderStats
+);
+router.get(
+  "/admin/orders/:orderId/payment-release",
+  requireAdminJson,
+  adminOrderPaymentsController.getOrderFundsStatus
+);
+router.post(
+  "/admin/orders/:orderId/payment-release",
+  requireAdminJson,
+  adminOrderPaymentsController.releaseOrderFunds
 );
 router.get(
   "/rooms/stats/all",

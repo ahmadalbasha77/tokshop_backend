@@ -1,13 +1,15 @@
 const functions = require("../shared/functions");
 const transactionModel = require("../models/transaction");
 const userModel = require("../models/user");
-const orderModel = require("../models/order");
 var mongoose = require("mongoose");
 const { sendEmail } = require('../shared/email');
 const {
   getStripeAccountStatus,
   getStripeAccountStatusCode,
 } = require("../shared/stripeAccountStatus");
+const {
+  releaseEligibleOrderPayments,
+} = require("../shared/orderPaymentRelease");
 const CUTOFF_UTC_MS = Date.parse("2026-02-25T03:00:00.000Z");
 exports.handleStripeWebhook = async (req, res) => {
   const sig = req.headers["stripe-signature"];
@@ -231,7 +233,6 @@ async function processClearedTransactions(stripe) {
       }
 
       const sellerTxs = grouped[sellerId];
-      let totalAmount = 0;
       try {
         if (seller.stripe_account) {
           // Mark transactions
@@ -240,104 +241,10 @@ async function processClearedTransactions(stripe) {
             { _id: { $in: sellerTxs.map((tx) => tx._id) } },
             { status: "Completed", payment_available: true }
           );
-          const deliveredOrderIds = await orderModel.distinct("_id", {
-            _id: {
-              $in: sellerTxs
-                .map((tx) => tx.orderId)
-                .filter(Boolean),
-            },
-            status: "delivered",
+          await releaseEligibleOrderPayments({
+            orderIds: sellerTxs.map((transaction) => transaction.orderId),
+            stripeClient: stripe,
           });
-          let ordertransactions = await transactionModel.find(
-            {
-              _id: { $in: sellerTxs.map((tx) => tx._id) },
-              orderId: { $in: deliveredOrderIds },
-              order_fulfilled: true,
-              payment_available: true,
-              paid_out: false,
-              type: "order",
-            },
-          );
-          console.log("ordertransactions", seller?._id, ordertransactions)
-          if (ordertransactions.length) {
-
-            totalAmount = ordertransactions.reduce(
-              (sum, tx) => sum + tx.amount,
-              0
-            );
-            console.log("amot ", totalAmount)
-            const owed = Math.min(0, seller.wallet || 0);
-            const netAmount = totalAmount + owed;
-            if (netAmount <= 0) {
-              console.log("Nothing to pay after shipping deduction");
-              continue;
-            }
-            const stripeAmount = Math.round(netAmount * 100);
-            // let stripeAmount = Math.round(parseFloat(totalAmount).toFixed(2) * 100);
-            console.log("stripeAmount", stripeAmount)
-            const batchId = new mongoose.Types.ObjectId().toString();
-
-            const locked = await transactionModel.updateMany(
-              {
-                _id: { $in: ordertransactions.map(t => t._id) },
-                paid_out: false,
-                payout_batch_id: { $exists: false }
-              },
-              { $set: { payout_batch_id: batchId } }
-            );
-
-            if (locked.modifiedCount === 0) continue;
-            try {
-               const idemKey = `seller_${sellerId}_${batchId}`
-              const transfer = await stripe.transfers.create({
-                amount: stripeAmount,
-                currency: "usd",
-                destination: seller.stripe_account,
-                transfer_group: `seller_${sellerId}_${batchId}`,
-              }, { idempotencyKey: idemKey });
-
-
-              console.log("transfer from web hook ", transfer);
-              console.log(`✅ Paid $${totalAmount} to seller ${sellerId}`);
-              let ss = await userModel.findOneAndUpdate(
-                { _id: sellerId },
-                {
-                  $inc: {
-                    wallet: netAmount,
-                    walletPending: -totalAmount
-                  },
-                  $set: {
-                    last_stripe_transfer: new Date(),
-                  }
-                },
-                { new: true }
-              );
-
-              await transactionModel.updateMany(
-                { payout_batch_id: batchId },
-                { $set: { paid_out: true, transferId: transfer.id }, $unset: { payout_batch_id: "" } }
-              );
-              await transactionModel.create({
-                from: null,
-                to: sellerId,
-                reason: "Transfer Initiated",
-                type: "transfer",
-                amount: netAmount,
-                status: "Completed",
-                deducting: false,
-                date: Date.now(),
-                new_pending_balance: ss?.walletPending,
-                transferId: transfer?.id
-              })
-            } catch (err) {
-              await transactionModel.updateMany(
-                { payout_batch_id: batchId },
-                { $unset: { payout_batch_id: "" } }
-              );
-              throw err;
-            }
-            await sendPaymentEmail(seller, `${netAmount.toFixed(2)}`);
-          }
         } else {
           console.log("no stripe account ", seller);
           await transactionModel.updateMany(
@@ -482,28 +389,5 @@ async function transfer_service_fee(stripe) {
         { $unset: { transfer_batch_id: "" } }
       );
     }
-  }
-}
-
-async function sendPaymentEmail(seller, amount) {
-  try {
-    let ownerEmail = seller?.email;
-    console.log("ownerEmail", ownerEmail)
-    if (!ownerEmail) {
-      console.error('❌ [Analytics Email] Room owner email not found');
-      return;
-    }
-
-    const placeholders = {
-      name: seller?.userName,
-      amount: '$' + amount
-    };
-
-    await sendEmail(placeholders, ownerEmail, "payment_available");
-
-    console.log(`✅ [Analytics Email] Successfully sent to ${ownerEmail}`);
-
-  } catch (error) {
-    console.error(`❌ [Analytics Email] Error:`, error.message);
   }
 }

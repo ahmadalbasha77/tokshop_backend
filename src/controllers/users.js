@@ -1767,13 +1767,43 @@ exports.getUserReviews = async (req, res) => {
   try {
     let reviewresponse = await reviewModel
       .find({ to: req.params.id })
-      .populate("from", ["firstName", "profilePhoto"])
+      .populate("from", [
+        "firstName",
+        "lastName",
+        "userName",
+        "profilePhoto",
+        "first_name",
+        "last_name",
+        "username",
+        "profile_photo",
+        "profilephoto"
+      ])
       .populate("reviews")
       .sort("-_id");
+    const formattedReviews = reviewresponse.map((review) => {
+      const r = review.toObject ? review.toObject() : review;
+      
+      if (r.from && typeof r.from === "object") {
+        // Ensure camelCase fields are mapped correctly for the Flutter client
+        r.from.userName = r.from.userName || r.from.username || "";
+        r.from.profilePhoto = r.from.profilePhoto || r.from.profile_photo || r.from.profilephoto || "";
+        r.from.firstName = r.from.firstName || r.from.first_name || "";
+        r.from.lastName = r.from.lastName || r.from.last_name || "";
+      } else {
+        r.from = {
+          _id: r.from || "unknown",
+          userName: "Unknown",
+          profilePhoto: "",
+          firstName: "Unknown",
+          lastName: ""
+        };
+      }
+      return r;
+    });
     res
       .status(200)
       .setHeader("Content-Type", "application/json")
-      .json({ success: true, data: reviewresponse });
+      .json({ success: true, data: formattedReviews });
   } catch (error) {
     res
       .status(422)

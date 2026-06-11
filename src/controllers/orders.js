@@ -8,6 +8,9 @@ const moment = require("moment");
 const { createTestStripeToken } = require("./stripe");
 const itemModel = require("../models/item");
 const socketEmitter = require("../shared/socketEmitter");
+const {
+  releaseEligibleOrderPayments,
+} = require("../shared/orderPaymentRelease");
 
 var mongoose = require("mongoose");
 const axios = require("axios");
@@ -1618,6 +1621,12 @@ exports.updateOrderById = async (req, res) => {
         );
         await itemModel.updateMany({ orderId: o._id }, { $set: { status: status } });
       }
+    }
+
+    if (status === "delivered") {
+      await releaseEligibleOrderPayments({
+        orderIds: orders.map((order) => order._id),
+      });
     }
 
     return res.status(200).json(bundleId ? orders : orders[0]);

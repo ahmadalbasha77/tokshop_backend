@@ -1,0 +1,203 @@
+const crypto = require("crypto");
+const appSettings = require("../models/settings");
+const orderModel = require("../models/order");
+const transactionModel = require("../models/transaction");
+const userModel = require("../models/user");
+const { sendEmail } = require("./email");
+
+function normalizeOrderIds(orderIds) {
+  if (!Array.isArray(orderIds)) return [];
+  return [...new Set(orderIds.filter(Boolean).map((id) => id.toString()))];
+}
+
+async function sendPaymentAvailableEmail(seller, amount) {
+  if (!seller?.email) return;
+
+  try {
+    await sendEmail(
+      {
+        name: seller.userName,
+        amount: `$${amount.toFixed(2)}`,
+      },
+      seller.email,
+      "payment_available"
+    );
+  } catch (error) {
+    console.error("Payment available email failed:", error.message);
+  }
+}
+
+async function getStripeClient() {
+  const settings = await appSettings.findOne().select("stripeSecretKey");
+  if (!settings?.stripeSecretKey) {
+    throw new Error("Stripe configuration is unavailable");
+  }
+  return require("stripe")(settings.stripeSecretKey);
+}
+
+async function releaseEligibleOrderPayments({
+  orderIds,
+  stripeClient = null,
+  requireDelivered = true,
+}) {
+  const normalizedOrderIds = normalizeOrderIds(orderIds);
+  if (!normalizedOrderIds.length) return [];
+
+  const orderFilter = {
+    _id: { $in: normalizedOrderIds },
+  };
+  if (requireDelivered) orderFilter.status = "delivered";
+
+  const eligibleOrderIds = await orderModel.distinct("_id", orderFilter);
+  if (!eligibleOrderIds.length) return [];
+
+  const candidates = await transactionModel.find({
+    orderId: { $in: eligibleOrderIds },
+    type: "order",
+    status: "Completed",
+    order_fulfilled: true,
+    payment_available: true,
+    paid_out: false,
+    to: { $ne: null },
+    payout_batch_id: { $exists: false },
+  });
+  if (!candidates.length) return [];
+
+  const grouped = new Map();
+  for (const transaction of candidates) {
+    const sellerId = transaction.to.toString();
+    if (!grouped.has(sellerId)) grouped.set(sellerId, []);
+    grouped.get(sellerId).push(transaction);
+  }
+
+  const stripe = stripeClient || (await getStripeClient());
+  const releases = [];
+
+  for (const [sellerId, sellerTransactions] of grouped.entries()) {
+    const batchId = crypto.randomUUID();
+    const candidateIds = sellerTransactions.map((transaction) => transaction._id);
+    const locked = await transactionModel.updateMany(
+      {
+        _id: { $in: candidateIds },
+        paid_out: false,
+        payout_batch_id: { $exists: false },
+      },
+      { $set: { payout_batch_id: batchId } }
+    );
+
+    if (locked.modifiedCount === 0) continue;
+
+    try {
+      const claimedTransactions = await transactionModel.find({
+        payout_batch_id: batchId,
+        paid_out: false,
+      });
+      if (!claimedTransactions.length) {
+        await transactionModel.updateMany(
+          { payout_batch_id: batchId },
+          { $unset: { payout_batch_id: "" } }
+        );
+        continue;
+      }
+
+      const seller = await userModel.findById(sellerId);
+      if (!seller?.stripe_account) {
+        throw new Error(`Seller ${sellerId} does not have a Stripe account`);
+      }
+
+      const totalAmount = claimedTransactions.reduce(
+        (sum, transaction) => sum + Number(transaction.amount || 0),
+        0
+      );
+      const owed = Math.min(0, Number(seller.wallet || 0));
+      const netAmount = totalAmount + owed;
+
+      if (netAmount <= 0) {
+        await transactionModel.updateMany(
+          { payout_batch_id: batchId },
+          { $unset: { payout_batch_id: "" } }
+        );
+        continue;
+      }
+
+      const transactionKey = claimedTransactions
+        .map((transaction) => transaction._id.toString())
+        .sort()
+        .join(":");
+      const releaseKey = crypto
+        .createHash("sha256")
+        .update(`${sellerId}:${transactionKey}`)
+        .digest("hex");
+      const transfer = await stripe.transfers.create(
+        {
+          amount: Math.round(netAmount * 100),
+          currency: "usd",
+          destination: seller.stripe_account,
+          transfer_group: `seller_${sellerId}_${releaseKey.slice(0, 24)}`,
+        },
+        { idempotencyKey: `seller_release_${releaseKey}` }
+      );
+
+      const updatedSeller = await userModel.findOneAndUpdate(
+        { _id: sellerId },
+        {
+          $inc: {
+            wallet: netAmount,
+            walletPending: -totalAmount,
+          },
+          $set: {
+            last_stripe_transfer: new Date(),
+          },
+        },
+        { new: true }
+      );
+      if (!updatedSeller) {
+        throw new Error(`Seller ${sellerId} was not found during payment release`);
+      }
+
+      await transactionModel.updateMany(
+        { payout_batch_id: batchId },
+        {
+          $set: {
+            paid_out: true,
+            transferId: transfer.id,
+          },
+          $unset: { payout_batch_id: "" },
+        }
+      );
+      await transactionModel.create({
+        from: null,
+        to: sellerId,
+        reason: "Transfer Initiated",
+        type: "transfer",
+        amount: netAmount,
+        status: "Completed",
+        deducting: false,
+        date: Date.now(),
+        new_pending_balance: updatedSeller.walletPending,
+        transferId: transfer.id,
+      });
+
+      releases.push({
+        sellerId,
+        totalAmount,
+        netAmount,
+        transferId: transfer.id,
+      });
+      await sendPaymentAvailableEmail(seller, netAmount);
+    } catch (error) {
+      await transactionModel.updateMany(
+        { payout_batch_id: batchId },
+        { $unset: { payout_batch_id: "" } }
+      );
+      throw error;
+    }
+  }
+
+  return releases;
+}
+
+module.exports = {
+  normalizeOrderIds,
+  releaseEligibleOrderPayments,
+};

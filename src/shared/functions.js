@@ -215,7 +215,7 @@ async function createOrder({
   const response = await getSettings();
   let commission = await getCommission(null, product);
   console.log(commission)
-  const serviceFee = (subtotal * ((commission ?? 10) / 100)).toFixed(2);
+  const serviceFee = (subtotal * ((commission ?? 1) / 100)).toFixed(2);
   console.log("allow_referal_discount", allow_referal_discount)
   if (allow_referal_discount == true) {
     referralDiscount = response.referral_credit;
@@ -226,7 +226,7 @@ async function createOrder({
 
   const extra_charges = parseFloat(response["extra_charges"]);
   const totalMinusDeductions =
-    subtotal - serviceFee - tax - extra_charges - stripe_fee;
+    subtotal - serviceFee - extra_charges - stripe_fee;
 
   const earnings = Number(totalMinusDeductions.toFixed(2));
   const totalStripeCharges = extra_charges + stripe_fee;
