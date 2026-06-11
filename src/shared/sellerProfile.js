@@ -48,6 +48,8 @@ const stripeStatusResponse = (stripeStatus) => ({
   ready: stripeStatus?.ready === true,
   can_sell: stripeStatus?.can_sell === true,
   onboarding_required: stripeStatus?.onboarding_required === true,
+  upfront_identity_document_required:
+    stripeStatus?.upfront_identity_document_required === true,
   verification_pending: stripeStatus?.verification_pending === true,
   charges_enabled: stripeStatus?.charges_enabled === true,
   payouts_enabled: stripeStatus?.payouts_enabled === true,

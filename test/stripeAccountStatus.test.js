@@ -17,12 +17,83 @@ const activeWithFutureRequirements = getStripeAccountStatus({
 });
 
 assert.equal(activeWithFutureRequirements.ready, true);
-assert.equal(activeWithFutureRequirements.onboarding_required, true);
-assert.equal(activeWithFutureRequirements.can_sell, false);
+assert.equal(activeWithFutureRequirements.onboarding_required, false);
+assert.equal(activeWithFutureRequirements.can_sell, true);
 assert.equal(
   getStripeAccountStatusCode(activeWithFutureRequirements),
+  "STRIPE_ACCOUNT_READY"
+);
+
+const activeWithFutureIdentityDocument = getStripeAccountStatus({
+  charges_enabled: true,
+  payouts_enabled: true,
+  details_submitted: true,
+  capabilities: { card_payments: "active", transfers: "active" },
+  requirements: {
+    currently_due: [],
+    past_due: [],
+    eventually_due: [],
+  },
+  future_requirements: {
+    currently_due: ["individual.verification.document"],
+    eventually_due: ["individual.verification.document"],
+  },
+});
+
+assert.equal(activeWithFutureIdentityDocument.onboarding_required, true);
+assert.equal(
+  activeWithFutureIdentityDocument.upfront_identity_document_required,
+  true
+);
+assert.equal(activeWithFutureIdentityDocument.verification_pending, false);
+assert.equal(activeWithFutureIdentityDocument.can_sell, false);
+assert.equal(
+  getStripeAccountStatusCode(activeWithFutureIdentityDocument),
   "STRIPE_FUTURE_REQUIREMENTS_PENDING"
 );
+
+const activeWithEventuallyDueIdentityDocument = getStripeAccountStatus({
+  charges_enabled: true,
+  payouts_enabled: true,
+  details_submitted: true,
+  capabilities: { card_payments: "active", transfers: "active" },
+  requirements: {
+    currently_due: [],
+    past_due: [],
+    eventually_due: ["individual.verification.document"],
+  },
+});
+
+assert.equal(activeWithEventuallyDueIdentityDocument.onboarding_required, true);
+assert.equal(
+  activeWithEventuallyDueIdentityDocument.upfront_identity_document_required,
+  true
+);
+assert.equal(activeWithEventuallyDueIdentityDocument.can_sell, false);
+
+const futureIdentityDocumentUnderReview = getStripeAccountStatus({
+  charges_enabled: true,
+  payouts_enabled: true,
+  details_submitted: true,
+  capabilities: { card_payments: "active", transfers: "active" },
+  requirements: {
+    currently_due: [],
+    past_due: [],
+    eventually_due: [],
+  },
+  future_requirements: {
+    eventually_due: ["individual.verification.document"],
+    pending_verification: ["individual.verification.document"],
+  },
+});
+
+assert.equal(futureIdentityDocumentUnderReview.onboarding_required, false);
+assert.equal(
+  futureIdentityDocumentUnderReview.upfront_identity_document_required,
+  false
+);
+assert.equal(futureIdentityDocumentUnderReview.verification_pending, true);
+assert.equal(futureIdentityDocumentUnderReview.can_sell, false);
 
 const restrictedAccount = getStripeAccountStatus({
   charges_enabled: false,

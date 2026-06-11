@@ -56,8 +56,8 @@ const getAllowedOnboardingHosts = () => {
     .filter(Boolean);
 
   return new Set([
-    "tokshoplive.com",
-    "www.tokshoplive.com",
+    "steelz.live",
+    "www.steelz.live",
     "iconaapp.com",
     "www.iconaapp.com",
     ...configuredHosts,
@@ -92,6 +92,7 @@ const createStripeOnboardingLink = async ({
   accountId,
   refreshUrl,
   returnUrl,
+  collectFutureRequirements = false,
 }) =>
   stripe.accountLinks.create({
     account: accountId,
@@ -99,8 +100,8 @@ const createStripeOnboardingLink = async ({
     return_url: returnUrl,
     type: "account_onboarding",
     collection_options: {
-      fields: "eventually_due",
-      future_requirements: "include",
+      fields: collectFutureRequirements ? "eventually_due" : "currently_due",
+      future_requirements: collectFutureRequirements ? "include" : "omit",
     },
   });
 
@@ -1085,6 +1086,8 @@ exports.createConnectOnboardingLink = async (req, res) => {
       accountId: user.stripe_account,
       refreshUrl: refresh_url,
       returnUrl: return_url,
+      collectFutureRequirements:
+        stripeStatus.upfront_identity_document_required === true,
     });
 
     return res.json({

@@ -1,3 +1,15 @@
+const IDENTITY_DOCUMENT_REQUIREMENT = "individual.verification.document";
+
+const includesIdentityDocument = (requirements = []) =>
+  requirements.some((requirement) =>
+    String(requirement).startsWith(IDENTITY_DOCUMENT_REQUIREMENT)
+  );
+
+const errorsIncludeIdentityDocument = (errors = []) =>
+  errors.some((error) =>
+    String(error?.requirement || "").startsWith(IDENTITY_DOCUMENT_REQUIREMENT)
+  );
+
 const getStripeAccountStatus = (account) => {
   const disabledReason = account?.requirements?.disabled_reason || null;
   const currentlyDue = account?.requirements?.currently_due || [];
@@ -23,10 +35,24 @@ const getStripeAccountStatus = (account) => {
     account?.capabilities?.transfers || "inactive";
   const legacyPayments =
     account?.capabilities?.legacy_payments || "inactive";
-  const pendingRequirements = new Set([
-    ...pendingVerification,
-    ...futurePendingVerification,
-  ]);
+  const pendingRequirements = new Set(pendingVerification);
+  const identityDocumentCurrentlyRequired =
+    includesIdentityDocument(currentlyDue) ||
+    includesIdentityDocument(pastDue) ||
+    errorsIncludeIdentityDocument(requirementErrors);
+  const identityDocumentRequiredInFuture =
+    includesIdentityDocument(eventuallyDue) ||
+    includesIdentityDocument(futureCurrentlyDue) ||
+    includesIdentityDocument(futurePastDue) ||
+    includesIdentityDocument(futureEventuallyDue) ||
+    errorsIncludeIdentityDocument(futureRequirementErrors);
+  const identityDocumentVerificationPending =
+    includesIdentityDocument(pendingVerification) ||
+    includesIdentityDocument(futurePendingVerification);
+  const upfrontIdentityDocumentRequired =
+    identityDocumentRequiredInFuture &&
+    !identityDocumentCurrentlyRequired &&
+    !identityDocumentVerificationPending;
   const isPendingDisabledReason = (reason) =>
     reason === "requirements.pending_verification" ||
     reason === "under_review";
@@ -39,24 +65,18 @@ const getStripeAccountStatus = (account) => {
   const hasCollectableRequirements =
     account?.details_submitted !== true ||
     requirementErrors.length > 0 ||
-    futureRequirementErrors.length > 0 ||
     isActionableRequirementsReason(disabledReason) ||
-    isActionableRequirementsReason(futureDisabledReason) ||
     hasActionableRequirements(currentlyDue) ||
     hasActionableRequirements(pastDue) ||
-    hasActionableRequirements(eventuallyDue) ||
-    hasActionableRequirements(futureCurrentlyDue) ||
-    hasActionableRequirements(futurePastDue) ||
-    hasActionableRequirements(futureEventuallyDue);
+    upfrontIdentityDocumentRequired;
   const capabilityPending =
     cardPayments === "pending" ||
     transfers === "pending" ||
     legacyPayments === "pending";
   const verificationPending =
     pendingVerification.length > 0 ||
-    futurePendingVerification.length > 0 ||
+    identityDocumentVerificationPending ||
     isPendingDisabledReason(disabledReason) ||
-    isPendingDisabledReason(futureDisabledReason) ||
     (capabilityPending && !hasCollectableRequirements);
   const capabilitiesReady =
     account?.charges_enabled === true &&
@@ -79,6 +99,7 @@ const getStripeAccountStatus = (account) => {
     ready,
     can_sell: canSell,
     onboarding_required: onboardingRequired,
+    upfront_identity_document_required: upfrontIdentityDocumentRequired,
     verification_pending: verificationPending,
     charges_enabled: account?.charges_enabled === true,
     payouts_enabled: account?.payouts_enabled === true,

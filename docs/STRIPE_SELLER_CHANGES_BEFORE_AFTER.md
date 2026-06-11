@@ -597,8 +597,8 @@ Body:
 
 ```json
 {
-  "refresh_url": "https://tokshoplive.com/stripe/refresh",
-  "return_url": "https://tokshoplive.com/stripe/return"
+  "refresh_url": "https://steelz.live/stripe/refresh",
+  "return_url": "https://steelz.live/stripe/return"
 }
 ```
 
@@ -607,6 +607,18 @@ Body:
 ```json
 {
   "type": "account_onboarding",
+  "collection_options": {
+    "fields": "currently_due",
+    "future_requirements": "omit"
+  }
+}
+```
+
+إذا أعاد Stripe المتطلب المستقبلي
+`individual.verification.document`، يبدّل Backend هذا الحساب فقط إلى:
+
+```json
+{
   "collection_options": {
     "fields": "eventually_due",
     "future_requirements": "include"
@@ -617,7 +629,8 @@ Body:
 النتيجة:
 
 - Stripe يجمع المتطلبات الحالية.
-- Stripe يستطيع جمع المتطلبات المستقبلية مبكرًا.
+- Stripe لا يطلب المتطلبات المستقبلية الأخرى قبل أن تصبح مطلوبة.
+- وثيقة الهوية المستقبلية تمنع البيع ويتم طلبها مسبقًا.
 - مستند الهوية يذهب مباشرة إلى Stripe.
 - Backend وFlutter لا يخزنان صورة المستند.
 - Account Link مؤقت ويستخدم مرة واحدة.
@@ -627,8 +640,8 @@ Body:
 يسمح افتراضيًا فقط بـ:
 
 ```text
-tokshoplive.com
-www.tokshoplive.com
+steelz.live
+www.steelz.live
 iconaapp.com
 www.iconaapp.com
 ```
@@ -1184,15 +1197,15 @@ test/stripeAccountStatus.test.js
 5. التأكد من أن Deep Links تعمل:
 
 ```text
-https://tokshoplive.com/stripe/return
-https://tokshoplive.com/stripe/refresh
+https://steelz.live/stripe/return
+https://steelz.live/stripe/refresh
 ```
 
 6. التأكد من ملفات:
 
 ```text
-https://tokshoplive.com/.well-known/assetlinks.json
-https://tokshoplive.com/.well-known/apple-app-site-association
+https://steelz.live/.well-known/assetlinks.json
+https://steelz.live/.well-known/apple-app-site-association
 ```
 
 7. اختبار Stripe Test Mode قبل Live Mode.
@@ -1252,7 +1265,7 @@ Protected seller action
 ## 29. حدود معروفة
 
 1. Stripe هو الذي يحدد هل مستند الهوية مطلوب.
-2. `eventually_due` و`future_requirements` يجمعان المتطلبات التي يعرضها Stripe، لكنهما لا يفرضان مستندًا إذا Stripe لم يطلبه للحساب.
+2. `currently_due` يجمع المطلوب الآن، لكن ظهور `individual.verification.document` مستقبليًا يفعّل جمع الوثيقة مسبقًا قبل السماح بالبيع.
 3. فرض التحقق من الهوية على جميع البائعين بغض النظر عن متطلبات Connect يحتاج منتجًا أو إعدادًا إضافيًا مثل Stripe Identity أو Additional Verifications إذا كان متاحًا للحساب.
 4. Webhook يخزن ملخصًا فقط؛ فحص Stripe الحي يبقى المرجع النهائي.
 5. تعذر تشغيل التطبيق كاملًا محليًا وقت المراجعة لأن `node_modules` غير موجود ولا يوجد `package-lock.json`.

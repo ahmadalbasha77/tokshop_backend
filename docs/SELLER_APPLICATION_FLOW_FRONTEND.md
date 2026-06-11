@@ -395,8 +395,8 @@ onboarding link:
 
 ```json
 {
-  "refresh_url": "https://tokshoplive.com/stripe/refresh",
-  "return_url": "https://tokshoplive.com/stripe/return"
+  "refresh_url": "https://steelz.live/stripe/refresh",
+  "return_url": "https://steelz.live/stripe/return"
 }
 ```
 
@@ -434,10 +434,13 @@ Use this flow:
 6. If Stripe redirects to `/stripe/refresh`, request a new account link. Never
    reuse the previous URL.
 
-Stripe decides which missing information to display. With
-`fields=eventually_due` and `future_requirements=include`, the hosted form can
-collect identity documents and other future requirements before they interrupt
-payouts.
+Stripe decides which missing information to display. The hosted form uses
+`fields=currently_due` and `future_requirements=omit`, so it asks only for
+requirements that need action now. Other future requirements remain visible in
+the eligibility response without blocking selling. If Stripe lists
+`individual.verification.document` as a future requirement, the backend blocks
+selling and switches that account link to up-front onboarding so Stripe collects
+the identity document before the seller starts selling.
 
 ## Identity Document Under Review
 
