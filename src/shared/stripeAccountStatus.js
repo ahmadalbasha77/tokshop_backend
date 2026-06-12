@@ -94,11 +94,28 @@ const getStripeAccountStatus = (account) => {
     ready &&
     !onboardingRequired &&
     !verificationPending;
+  const nextAction = onboardingRequired
+    ? "OPEN_STRIPE_ONBOARDING"
+    : verificationPending
+      ? "WAIT_FOR_STRIPE_VERIFICATION"
+      : canSell
+        ? "SELLER_READY"
+        : "CONTACT_SUPPORT";
+  const statusMessage = onboardingRequired
+    ? "Complete the required information in Stripe to activate your seller account."
+    : verificationPending
+      ? "Your seller information was submitted and is being reviewed by Stripe."
+      : canSell
+        ? "Your seller account is ready to sell."
+        : "Your Stripe account is restricted. Please contact support.";
 
   return {
     ready,
     can_sell: canSell,
     onboarding_required: onboardingRequired,
+    requires_onboarding_link: onboardingRequired,
+    next_action: nextAction,
+    status_message: statusMessage,
     upfront_identity_document_required: upfrontIdentityDocumentRequired,
     verification_pending: verificationPending,
     charges_enabled: account?.charges_enabled === true,

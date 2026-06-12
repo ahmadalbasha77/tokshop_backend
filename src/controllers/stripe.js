@@ -868,6 +868,9 @@ exports.connect = async (req, res) => {
         account_id: existingAccount.id,
         can_sell: stripeStatus.can_sell,
         onboarding_required: stripeStatus.onboarding_required,
+        requires_onboarding_link: stripeStatus.requires_onboarding_link,
+        next_action: stripeStatus.next_action,
+        message: stripeStatus.status_message,
         verification_pending: stripeStatus.verification_pending,
         code: getStripeAccountStatusCode(stripeStatus),
         stripe_status: stripeStatus,
@@ -1072,11 +1075,11 @@ exports.createConnectOnboardingLink = async (req, res) => {
         success: true,
         can_sell: stripeStatus.can_sell,
         onboarding_required: false,
+        requires_onboarding_link: false,
+        next_action: stripeStatus.next_action,
         verification_pending: stripeStatus.verification_pending,
         code,
-        message: stripeStatus.verification_pending
-          ? "Your identity document was submitted and is being reviewed by Stripe."
-          : undefined,
+        message: stripeStatus.status_message,
         stripe_status: stripeStatus,
       });
     }
@@ -1094,8 +1097,11 @@ exports.createConnectOnboardingLink = async (req, res) => {
       success: true,
       can_sell: false,
       onboarding_required: true,
+      requires_onboarding_link: true,
+      next_action: "OPEN_STRIPE_ONBOARDING",
       verification_pending: stripeStatus.verification_pending,
       code: "STRIPE_ONBOARDING_REQUIRED",
+      message: stripeStatus.status_message,
       url: accountLink.url,
       expires_at: accountLink.expires_at,
       stripe_status: stripeStatus,

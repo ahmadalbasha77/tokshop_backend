@@ -383,6 +383,30 @@ The response can contain:
 `success: true` means that the Stripe account exists. It does not mean the
 account is approved to sell.
 
+Stripe responses now include explicit frontend instructions:
+
+```json
+{
+  "can_sell": false,
+  "onboarding_required": true,
+  "requires_onboarding_link": true,
+  "next_action": "OPEN_STRIPE_ONBOARDING",
+  "message": "Complete the required information in Stripe to activate your seller account."
+}
+```
+
+Possible `next_action` values:
+
+- `OPEN_STRIPE_ONBOARDING`: request and open a fresh onboarding link.
+- `WAIT_FOR_STRIPE_VERIFICATION`: show a review-pending screen and a check-status action.
+- `SELLER_READY`: continue to the seller action that originally triggered the flow.
+- `CONTACT_SUPPORT`: show the backend message and a support action.
+- `WAIT_FOR_SELLER_APPROVAL`: show the seller-application pending state.
+- `COMPLETE_SELLER_PROFILE`: open the payout/KYC setup screen and call
+  `POST /stripe/connect/:id` when the form is submitted.
+
+Flutter must not show a generic error only because `can_sell == false`.
+
 If `code == STRIPE_FUTURE_REQUIREMENTS_PENDING`, the account can currently be
 eligible to sell, but Stripe has future verification information available for
 collection. Flutter should still open onboarding when
@@ -433,6 +457,52 @@ Use this flow:
    again.
 6. If Stripe redirects to `/stripe/refresh`, request a new account link. Never
    reuse the previous URL.
+
+Recommended Flutter decision flow:
+
+```dart
+Future<void> handleStripeSellerResponse(Map<String, dynamic> data) async {
+  switch (data['next_action']) {
+    case 'OPEN_STRIPE_ONBOARDING':
+      final link = await api.post(
+        '/stripe/connect/$userId/onboarding-link',
+        data: {
+          'return_url': 'https://steelz.live/stripe/return',
+          'refresh_url': 'https://steelz.live/stripe/refresh',
+        },
+      );
+      await launchUrl(
+        Uri.parse(link.data['url']),
+        mode: LaunchMode.externalApplication,
+      );
+      return;
+    case 'WAIT_FOR_STRIPE_VERIFICATION':
+      showStripeReviewPending(data['message']);
+      return;
+    case 'SELLER_READY':
+      continuePendingSellerAction();
+      return;
+    case 'WAIT_FOR_SELLER_APPROVAL':
+      showSellerApplicationPending(data['message']);
+      return;
+    case 'COMPLETE_SELLER_PROFILE':
+      openSellerPayoutSetup();
+      return;
+    default:
+      showSellerSupportError(data['message']);
+  }
+}
+```
+
+Call this handler after:
+
+- `POST /stripe/connect/:id`
+- `POST /stripe/connect/:id/onboarding-link`
+- `GET /users/seller/eligibility/:userId`
+- returning to the app through `https://steelz.live/stripe/return`
+
+Do not call `POST /stripe/connect/:id` again after returning from Stripe merely
+to check status. Use the eligibility endpoint instead.
 
 Stripe decides which missing information to display. The hosted form uses
 `fields=currently_due` and `future_requirements=omit`, so it asks only for

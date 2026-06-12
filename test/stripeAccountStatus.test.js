@@ -19,6 +19,7 @@ const activeWithFutureRequirements = getStripeAccountStatus({
 assert.equal(activeWithFutureRequirements.ready, true);
 assert.equal(activeWithFutureRequirements.onboarding_required, false);
 assert.equal(activeWithFutureRequirements.can_sell, true);
+assert.equal(activeWithFutureRequirements.next_action, "SELLER_READY");
 assert.equal(
   getStripeAccountStatusCode(activeWithFutureRequirements),
   "STRIPE_ACCOUNT_READY"
@@ -41,6 +42,11 @@ const activeWithFutureIdentityDocument = getStripeAccountStatus({
 });
 
 assert.equal(activeWithFutureIdentityDocument.onboarding_required, true);
+assert.equal(
+  activeWithFutureIdentityDocument.next_action,
+  "OPEN_STRIPE_ONBOARDING"
+);
+assert.equal(activeWithFutureIdentityDocument.requires_onboarding_link, true);
 assert.equal(
   activeWithFutureIdentityDocument.upfront_identity_document_required,
   true
@@ -94,6 +100,10 @@ assert.equal(
 );
 assert.equal(futureIdentityDocumentUnderReview.verification_pending, true);
 assert.equal(futureIdentityDocumentUnderReview.can_sell, false);
+assert.equal(
+  futureIdentityDocumentUnderReview.next_action,
+  "WAIT_FOR_STRIPE_VERIFICATION"
+);
 
 const restrictedAccount = getStripeAccountStatus({
   charges_enabled: false,
@@ -268,6 +278,7 @@ const rejectedAccount = getStripeAccountStatus({
 assert.equal(rejectedAccount.verification_pending, false);
 assert.equal(rejectedAccount.onboarding_required, false);
 assert.equal(rejectedAccount.can_sell, false);
+assert.equal(rejectedAccount.next_action, "CONTACT_SUPPORT");
 assert.equal(
   getStripeAccountStatusCode(rejectedAccount),
   "STRIPE_ACCOUNT_RESTRICTED"

@@ -48,6 +48,9 @@ const stripeStatusResponse = (stripeStatus) => ({
   ready: stripeStatus?.ready === true,
   can_sell: stripeStatus?.can_sell === true,
   onboarding_required: stripeStatus?.onboarding_required === true,
+  requires_onboarding_link: stripeStatus?.requires_onboarding_link === true,
+  next_action: stripeStatus?.next_action || "CONTACT_SUPPORT",
+  status_message: stripeStatus?.status_message || STRIPE_RESTRICTED_MESSAGE,
   upfront_identity_document_required:
     stripeStatus?.upfront_identity_document_required === true,
   verification_pending: stripeStatus?.verification_pending === true,
@@ -82,9 +85,11 @@ const stripeRestrictionResponse = (stripeStatus) => {
   const code = verificationPending
     ? STRIPE_VERIFICATION_PENDING_CODE
     : STRIPE_RESTRICTED_CODE;
-  const message = verificationPending
-    ? STRIPE_VERIFICATION_PENDING_MESSAGE
-    : STRIPE_RESTRICTED_MESSAGE;
+  const message = stripeStatus?.status_message || (
+    verificationPending
+      ? STRIPE_VERIFICATION_PENDING_MESSAGE
+      : STRIPE_RESTRICTED_MESSAGE
+  );
 
   return {
     success: false,
@@ -93,6 +98,8 @@ const stripeRestrictionResponse = (stripeStatus) => {
     message,
     error: message,
     onboarding_required: stripeStatus?.onboarding_required === true,
+    requires_onboarding_link: stripeStatus?.requires_onboarding_link === true,
+    next_action: stripeStatus?.next_action || "CONTACT_SUPPORT",
     verification_pending: stripeStatus?.verification_pending === true,
     stripe_status: {
       ...stripeStatusResponse(stripeStatus),
@@ -156,6 +163,7 @@ const getSellerEligibility = async (user) => {
       can_sell: false,
       code: "USER_NOT_FOUND",
       message: "User not found",
+      next_action: "CONTACT_SUPPORT",
       seller_approved: false,
       profile_complete: false,
       stripe_status: null,
@@ -170,6 +178,7 @@ const getSellerEligibility = async (user) => {
       can_sell: false,
       code: "SELLER_NOT_APPROVED",
       message: "Seller approval is required before continuing.",
+      next_action: "WAIT_FOR_SELLER_APPROVAL",
       seller_approved: false,
       profile_complete: false,
       stripe_status: null,
@@ -182,6 +191,7 @@ const getSellerEligibility = async (user) => {
       success: false,
       can_sell: false,
       ...incompleteProfileResponse(profileStatus.missing_fields),
+      next_action: "COMPLETE_SELLER_PROFILE",
       seller_approved: true,
       profile_complete: false,
       stripe_status: null,
@@ -206,6 +216,8 @@ const getSellerEligibility = async (user) => {
     seller_approved: true,
     profile_complete: true,
     onboarding_required: false,
+    requires_onboarding_link: false,
+    next_action: "SELLER_READY",
     verification_pending: false,
     stripe_status: stripeStatusResponse(stripeStatus),
   };

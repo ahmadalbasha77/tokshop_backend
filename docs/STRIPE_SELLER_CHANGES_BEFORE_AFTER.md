@@ -634,6 +634,19 @@ Body:
 - مستند الهوية يذهب مباشرة إلى Stripe.
 - Backend وFlutter لا يخزنان صورة المستند.
 - Account Link مؤقت ويستخدم مرة واحدة.
+- استجابات Stripe تعيد `next_action` و`requires_onboarding_link` حتى لا يعتبر
+  Flutter كل حالة `can_sell=false` خطأ عامًا.
+
+قيم `next_action`:
+
+```text
+OPEN_STRIPE_ONBOARDING
+WAIT_FOR_STRIPE_VERIFICATION
+SELLER_READY
+CONTACT_SUPPORT
+WAIT_FOR_SELLER_APPROVAL
+COMPLETE_SELLER_PROFILE
+```
 
 ### حماية روابط العودة
 
