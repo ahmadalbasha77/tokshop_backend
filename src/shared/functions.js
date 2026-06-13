@@ -28,6 +28,10 @@ const {
   getStripeAccountStatusCode,
   stripeRestrictionResponse
 } = require("./sellerProfile");
+const {
+  isStripeIdempotencyMismatch,
+  selectRecoverableStripeAccount,
+} = require("./stripeAccountRecovery");
 function getOrderPopulates() {
   return [
     {
@@ -1466,6 +1470,81 @@ async function getSettings() {
   return response[0];
 }
 
+const findRecoverableStripeAccount = async (
+  stripe,
+  { userId, email, country }
+) => {
+  const createdAfter = Math.floor(Date.now() / 1000) - (30 * 24 * 60 * 60);
+  const accountsInRecoveryWindow = [];
+  let startingAfter;
+
+  for (let page = 0; page < 5; page += 1) {
+    const accounts = await stripe.accounts.list({
+      limit: 100,
+      created: { gte: createdAfter },
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
+    });
+
+    accountsInRecoveryWindow.push(...accounts.data);
+
+    if (!accounts.has_more || accounts.data.length === 0) break;
+    startingAfter = accounts.data[accounts.data.length - 1].id;
+  }
+
+  const linkedUsers = await userModel.find({
+    stripe_account: {
+      $in: accountsInRecoveryWindow.map((account) => account.id),
+    },
+    _id: { $ne: userId },
+  }).select("stripe_account");
+  const linkedAccountIds = new Set(
+    linkedUsers.map((user) => user.stripe_account)
+  );
+
+  return selectRecoverableStripeAccount(accountsInRecoveryWindow, {
+    userId,
+    email,
+    country,
+    linkedAccountIds,
+  });
+};
+
+const saveConnectedStripeAccount = async (account, userId) => {
+  const data = account?.external_accounts?.data || [];
+  await bank.deleteMany({ userid: userId });
+  const stripeStatus = getStripeAccountStatus(account);
+  const statusCode = getStripeAccountStatusCode(stripeStatus);
+  const updatedUser = await userModel.findByIdAndUpdate(userId, {
+    $set: {
+      stripe_account: account.id,
+      applied_seller: true,
+      stripe_status_code: statusCode,
+      stripe_verification_pending: stripeStatus.verification_pending,
+      stripe_status_updated_at: new Date(),
+    }
+  });
+  if (!updatedUser) {
+    return {
+      success: false,
+      code: "USER_NOT_FOUND",
+      error: "User not found after Stripe account creation",
+    };
+  }
+  return {
+    success: true,
+    account_id: account.id,
+    can_sell: stripeStatus.can_sell,
+    onboarding_required: stripeStatus.onboarding_required,
+    requires_onboarding_link: stripeStatus.requires_onboarding_link,
+    next_action: stripeStatus.next_action,
+    message: stripeStatus.status_message,
+    verification_pending: stripeStatus.verification_pending,
+    code: statusCode,
+    stripe_status: stripeStatus,
+    bank: data[0],
+  };
+};
+
 const stripeConnect = async (
   payload,
   userId,
@@ -1503,7 +1582,7 @@ const stripeConnect = async (
         transfers: { requested: true },
       },
       business_profile: {
-        url: "https://pointifypos.com",
+        url: "https://www.stealz.live",
         mcc: "5734",
       },
       tos_acceptance: {
@@ -1539,50 +1618,68 @@ const stripeConnect = async (
   if (!response["stripeSecretKey"]) {
     return { error: "Stripe secret key not found in the admin setings", success: false };
   }
+  const accountOwner = await userModel.findById(userId).select("email");
+  if (!accountOwner) {
+    return {
+      success: false,
+      code: "USER_NOT_FOUND",
+      error: "User not found before Stripe account creation",
+    };
+  }
   const stripe = require("stripe")(response["stripeSecretKey"]);
+  payload.metadata = {
+    ...(payload.metadata || {}),
+    tokshop_user_id: String(userId),
+  };
   try {
     const account = await stripe.accounts.create(payload, {
       idempotencyKey: `seller-connect-${userId}`,
     });
-    if (account["external_accounts"]) {
-      let data = account["external_accounts"]["data"];
-      await bank.deleteMany({ userid: userId });
-      const stripeStatus = getStripeAccountStatus(account);
-      const statusCode = getStripeAccountStatusCode(stripeStatus);
-      const updatedUser = await userModel.findByIdAndUpdate(userId, {
-        $set: {
-          stripe_account: account["id"],
-          applied_seller: true,
-          stripe_status_code: statusCode,
-          stripe_verification_pending: stripeStatus.verification_pending,
-          stripe_status_updated_at: new Date(),
-        }
-      });
-      if (!updatedUser) {
-        return {
-          success: false,
-          code: "USER_NOT_FOUND",
-          error: "User not found after Stripe account creation",
-        };
-      }
-      return {
-        success: true,
-        account_created: true,
-        account_id: account.id,
-        can_sell: stripeStatus.can_sell,
-        onboarding_required: stripeStatus.onboarding_required,
-        requires_onboarding_link: stripeStatus.requires_onboarding_link,
-        next_action: stripeStatus.next_action,
-        message: stripeStatus.status_message,
-        verification_pending: stripeStatus.verification_pending,
-        code: statusCode,
-        stripe_status: stripeStatus,
-        bank: data[0],
-      };
-    } else {
+    if (!account?.external_accounts) {
       return { error: "error creating stripe account", success: false };
     }
+    return {
+      ...(await saveConnectedStripeAccount(account, userId)),
+      account_created: true,
+      account_recovered: false,
+    };
   } catch (error) {
+    if (isStripeIdempotencyMismatch(error)) {
+      try {
+        const recoveredAccount = await findRecoverableStripeAccount(stripe, {
+          userId,
+          email: accountOwner.email,
+          country: payload.country,
+        });
+        if (recoveredAccount) {
+          return {
+            ...(await saveConnectedStripeAccount(recoveredAccount, userId)),
+            account_created: false,
+            account_recovered: true,
+          };
+        }
+        return {
+          success: false,
+          code: "STRIPE_ACCOUNT_RECOVERY_REQUIRED",
+          next_action: "CONTACT_SUPPORT",
+          error:
+            "A Stripe account was previously created but could not be safely matched to this user. Please contact support.",
+        };
+      } catch (recoveryError) {
+        console.error("Unable to recover unlinked Stripe account", {
+          userId: String(userId),
+          type: recoveryError?.type,
+          code: recoveryError?.code,
+          message: recoveryError?.message,
+        });
+        return {
+          success: false,
+          code: "STRIPE_ACCOUNT_RECOVERY_FAILED",
+          next_action: "CONTACT_SUPPORT",
+          error: "Unable to recover the existing Stripe account. Please contact support.",
+        };
+      }
+    }
     return {
       success: false,
       code: error?.code || "STRIPE_ACCOUNT_CREATION_FAILED",

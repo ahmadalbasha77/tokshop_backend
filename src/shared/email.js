@@ -30,8 +30,11 @@ async function sendEmail(placeholders, toemail, slug, subject) {
   if (!emailTemplate) {
     throw new Error("Email template not found");
   }
-  placeholders.app_name = settings.app_name || settings.seo_title || 'IconaLive';
-  placeholders.support_email = settings.support_email || 'support@tokshoplive.com';
+  placeholders.app_name = settings.app_name || settings.seo_title || 'Stealz';
+  placeholders.support_email =
+    settings.support_email ||
+    settings.email_reply_to ||
+    settings.email_from_address;
   placeholders.primary_color = convertToHex(settings.primary_color);
   placeholders.secondary_color = convertToHex(settings.secondary_color);
   const htmlContent = replacePlaceholders(emailTemplate.htmlContent, placeholders);
@@ -116,6 +119,11 @@ async function sendWithBrevo(emailData, fromEmail, settings) {
   // Parse from email to get name and address
   let senderName = settings.email_from_name || 'No Reply';
   let senderEmail = fromEmail ?? settings.email_from_address;
+  const replyToEmail =
+    settings.email_reply_to ||
+    settings.support_email ||
+    senderEmail;
+  const replyToName = settings.email_reply_name || 'Stealz Support';
 
   const response = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
@@ -130,8 +138,8 @@ async function sendWithBrevo(emailData, fromEmail, settings) {
         email: senderEmail,
       },
       replyTo: {
-        email: "tokshop254@gmail.com",
-        name: "Tokshop Support",
+        email: replyToEmail,
+        name: replyToName,
       },
       to: [{ email: emailData.to }],
       subject: emailData.subject,

@@ -47,7 +47,7 @@ async function sendShowAnalyticsEmail(roomId) {
     tips_received: `$${(room.tipsTotal || 0).toFixed(2)}`,
     viewers: room.viewers?.length || 0,
     new_followers: room.followersCount || 0,
-    show_analytics_url: `${themesettings?.website_url || 'https://seller.iconaapp.com'}/shipping`,
+    show_analytics_url: `${themesettings?.website_url || 'https://www.stealz.live'}/shipping`,
   };
 
   console.log(`📧 [Analytics Email] Sending to: ${ownerEmail}`);

@@ -30,7 +30,7 @@ app.get("/open", (req, res) => {
     );
   }
 
-  return res.redirect("https://iconaapp.com");
+  return res.redirect("https://www.stealz.live");
 })
 
 // Password Reset Page
@@ -46,7 +46,7 @@ app.get("/reset-password", async (req, res) => {
     );
 
     // Inject theme settings
-    const appName = themesettings?.app_name || themesettings?.seo_title || "App";
+    const appName = themesettings?.app_name || themesettings?.seo_title || "Stealz";
     const appLogo = themesettings?.app_logo || "";
     const primaryColor = themesettings?.primary_color
       ? (themesettings.primary_color.startsWith("#")
@@ -102,7 +102,7 @@ var server = http.createServer(app);
 initSocket(server);
 
 server.listen(process.env.PORT, async function (){
-  console.log("Tokshop server listening on port " + process.env.PORT);
+  console.log("Stealz server listening on port " + process.env.PORT);
 });
 
 connect();

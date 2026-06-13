@@ -103,7 +103,7 @@ async function sendVerificationEmail(email, firstName, code) {
   }
 
   const settings = await functions.getSettings();
-  const appName = settings?.app_name || settings?.seo_title || "Tokshop";
+  const appName = settings?.app_name || settings?.seo_title || "Stealz";
   const primaryColor = settings?.primary_color
     ? (settings.primary_color.startsWith("#") ? settings.primary_color : "#" + settings.primary_color.replace(/^FF/i, ""))
     : "#111827";
@@ -458,7 +458,7 @@ async function createVerifiedEmailUser(pending, req, res) {
         { name: user.firstName + (user.lastName ? ` ${user.lastName}` : "") },
         user.email,
         "promotion",
-        "Check Out Tokshop All Features"
+        "Check Out Stealz All Features"
       );
     } catch (error) {
       console.error("Promotion email failed:", error);
@@ -833,7 +833,7 @@ exports.authenticate = async (req, res) => {
       }
       if (autoapprove == true) {
         try {
-          await sendEmail({ name: userName ?? firstName + (lastName ? ` ${lastName}` : '') }, email, 'promotion', "Check Out Tokshop All Features");
+          await sendEmail({ name: userName ?? firstName + (lastName ? ` ${lastName}` : '') }, email, 'promotion', "Check Out Stealz All Features");
         } catch (e) {
           console.log(e);
 

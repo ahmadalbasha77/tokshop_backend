@@ -597,8 +597,8 @@ Body:
 
 ```json
 {
-  "refresh_url": "https://steelz.live/stripe/refresh",
-  "return_url": "https://steelz.live/stripe/return"
+  "refresh_url": "https://stealz.live/stripe/refresh",
+  "return_url": "https://stealz.live/stripe/return"
 }
 ```
 
@@ -648,13 +648,18 @@ WAIT_FOR_SELLER_APPROVAL
 COMPLETE_SELLER_PROFILE
 ```
 
+إذا أنشأ Stripe الحساب لكن تعذر حفظ `stripe_account` على المستخدم، يحاول
+Backend استعادة حساب واحد مطابق وغير مربوط بدل إنشاء حساب مكرر. عند نجاح
+الاستعادة يعيد `account_recovered=true`. إذا لم يستطع تحديد حساب واحد بأمان،
+يعيد `STRIPE_ACCOUNT_RECOVERY_REQUIRED` و`CONTACT_SUPPORT`.
+
 ### حماية روابط العودة
 
 يسمح افتراضيًا فقط بـ:
 
 ```text
-steelz.live
-www.steelz.live
+stealz.live
+www.stealz.live
 iconaapp.com
 www.iconaapp.com
 ```
@@ -1210,15 +1215,15 @@ test/stripeAccountStatus.test.js
 5. التأكد من أن Deep Links تعمل:
 
 ```text
-https://steelz.live/stripe/return
-https://steelz.live/stripe/refresh
+https://stealz.live/stripe/return
+https://stealz.live/stripe/refresh
 ```
 
 6. التأكد من ملفات:
 
 ```text
-https://steelz.live/.well-known/assetlinks.json
-https://steelz.live/.well-known/apple-app-site-association
+https://stealz.live/.well-known/assetlinks.json
+https://stealz.live/.well-known/apple-app-site-association
 ```
 
 7. اختبار Stripe Test Mode قبل Live Mode.

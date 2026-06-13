@@ -32,7 +32,7 @@ exports.getRoomAnalytics = async (req, res) => {
       tipsReceived: room.tipsTotal || 0,
       viewers: room.viewers ? room.viewers.length : 0,
       newFollowers: room.followersCount || 0,
-      appUrl: "seller.iconaapp.com",
+      appUrl: "https://www.stealz.live",
       hostEmail: room.ownerId ? room.ownerId.email : "N/A",
     };
 

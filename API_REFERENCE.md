@@ -1,4 +1,4 @@
-# TokShop Backend — API Reference
+# Stealz Backend — API Reference
 
 > Auto-generated analysis of all REST endpoints.  
 > Base URL: `http://<host>:<port>`  

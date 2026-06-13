@@ -56,6 +56,9 @@ const getAllowedOnboardingHosts = () => {
     .filter(Boolean);
 
   return new Set([
+    "stealz.live",
+    "www.stealz.live",
+    // Temporary compatibility for app builds that still send the old typo.
     "steelz.live",
     "www.steelz.live",
     "iconaapp.com",
@@ -727,7 +730,7 @@ exports.stripePayoutPayments = async (req, res) => {
       const placeholders = {
         name: userres?.userName,
         amount: `$${amount}`,
-        dashboard_url: "https://iconaapp.com",
+        dashboard_url: "https://www.stealz.live",
         balance_after_payout: `$${userres?.wallet.toFixed(2)}`,
         bank_name: `${banks[0]["bank_name"]}****${banks[0]["last4"]}`
       };
@@ -823,7 +826,7 @@ exports.connect = async (req, res) => {
     day,
     month,
     ssn_last_4,
-    year, countryCode, applying, create_address, iban = null, url = 'https://iconaapp.com', mcc = '5999'
+    year, countryCode, applying, create_address, iban = null, url = 'https://www.stealz.live', mcc = '5999'
   } = req.body;
   if (!canManageStripeAccount(req, req.params.id)) {
     return res.status(403).json({

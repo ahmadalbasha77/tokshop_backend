@@ -48,7 +48,7 @@ const ThemeSchema = mongoose.Schema({
   },
   seo_title: {
     type: String,
-    default: "Tokshop Live Shopping"
+    default: "Stealz Live Shopping"
   },
 })
 

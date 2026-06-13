@@ -159,10 +159,10 @@ function generateShowAnalyticsEmail(data) {
           <tr>
             <td style="padding: 30px; text-align: center; border-top: 1px solid #e5e7eb;">
               <p style="margin: 0 0 8px 0; color: #6b7280; font-size: 14px;">
-                Thank you for hosting on TokshopLive!
+                Thank you for hosting on Stealz!
               </p>
               <p style="margin: 0; color: #9ca3af; font-size: 12px;">
-                © ${new Date().getFullYear()} TokshopLive. All rights reserved.
+                © ${new Date().getFullYear()} Stealz. All rights reserved.
               </p>
             </td>
           </tr>
@@ -218,9 +218,9 @@ ${showAnalyticsUrl}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Thank you for hosting on TokshopLive!
+Thank you for hosting on Stealz!
 
-© ${new Date().getFullYear()} TokshopLive. All rights reserved.
+© ${new Date().getFullYear()} Stealz. All rights reserved.
   `.trim();
 }
 

@@ -70,7 +70,7 @@ const ReferralLog = require("../models/referral_log");
 //       console.log(user.userName);
 
 //       await sendEmail({name: user.userName}, user.email,'seller_approval');
-//       await sendEmail({name: user.userName}, user.email,'promotion', "Check Out Tokshop All Features");
+//       await sendEmail({name: user.userName}, user.email,'promotion', "Check Out Stealz All Features");
 
 //       created++;
 //     } catch (err) {
@@ -577,7 +577,7 @@ exports.createPaymentMethod = async (req, res, next) => {
 
   if (req.body.customerid == null) {
     const customerdata = await stripe.customers.create({
-      description: "Tokshop",
+      description: "Stealz",
     });
     req.body.customerid = customerdata.id;
   }

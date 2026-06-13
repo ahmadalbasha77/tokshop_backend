@@ -1,10 +1,10 @@
 {
-  "name": "kilimo",
+  "name": "stealz-backend",
   "version": "0.0.0",
   "private": true,
   "scripts": {
     "start": "nodemon ./bin/www",
-    "test": "node test/stripeAccountStatus.test.js"
+    "test": "node test/stripeAccountStatus.test.js && node test/stripeAccountRecovery.test.js"
   },
   "dependencies": {
     "@onesignal/node-onesignal": "^1.0.0-beta4",
@@ -58,17 +58,17 @@
   "engines": {
     "node": ">=0.12"
   },
-  "description": "\"Edit me later\"",
+  "description": "Stealz backend",
   "main": "app.js",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/PiusKariuki/Kilimo_API.git"
+    "url": "git+https://github.com/ahmadalbasha77/tokshop_backend.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/PiusKariuki/Kilimo_API/issues"
+    "url": "https://github.com/ahmadalbasha77/tokshop_backend/issues"
   },
-  "homepage": "https://github.com/PiusKariuki/Kilimo_API#readme"
+  "homepage": "https://github.com/ahmadalbasha77/tokshop_backend#readme"
 }

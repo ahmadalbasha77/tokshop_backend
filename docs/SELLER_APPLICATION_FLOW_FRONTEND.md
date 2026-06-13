@@ -407,6 +407,23 @@ Possible `next_action` values:
 
 Flutter must not show a generic error only because `can_sell == false`.
 
+If the backend safely recovers a Stripe account that was created previously but
+was not saved on the user, the connect response contains:
+
+```json
+{
+  "success": true,
+  "account_created": false,
+  "account_recovered": true,
+  "next_action": "OPEN_STRIPE_ONBOARDING"
+}
+```
+
+Handle this exactly like any other successful connect response. Do not submit
+the bank form again. If automatic recovery cannot safely identify exactly one
+account, the backend returns `STRIPE_ACCOUNT_RECOVERY_REQUIRED` with
+`next_action: CONTACT_SUPPORT` instead of creating a duplicate Stripe account.
+
 If `code == STRIPE_FUTURE_REQUIREMENTS_PENDING`, the account can currently be
 eligible to sell, but Stripe has future verification information available for
 collection. Flutter should still open onboarding when
@@ -419,8 +436,8 @@ onboarding link:
 
 ```json
 {
-  "refresh_url": "https://steelz.live/stripe/refresh",
-  "return_url": "https://steelz.live/stripe/return"
+  "refresh_url": "https://stealz.live/stripe/refresh",
+  "return_url": "https://stealz.live/stripe/return"
 }
 ```
 
@@ -467,8 +484,8 @@ Future<void> handleStripeSellerResponse(Map<String, dynamic> data) async {
       final link = await api.post(
         '/stripe/connect/$userId/onboarding-link',
         data: {
-          'return_url': 'https://steelz.live/stripe/return',
-          'refresh_url': 'https://steelz.live/stripe/refresh',
+          'return_url': 'https://stealz.live/stripe/return',
+          'refresh_url': 'https://stealz.live/stripe/refresh',
         },
       );
       await launchUrl(
@@ -499,7 +516,7 @@ Call this handler after:
 - `POST /stripe/connect/:id`
 - `POST /stripe/connect/:id/onboarding-link`
 - `GET /users/seller/eligibility/:userId`
-- returning to the app through `https://steelz.live/stripe/return`
+- returning to the app through `https://stealz.live/stripe/return`
 
 Do not call `POST /stripe/connect/:id` again after returning from Stripe merely
 to check status. Use the eligibility endpoint instead.

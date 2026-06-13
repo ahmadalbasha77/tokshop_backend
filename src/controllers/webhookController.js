@@ -163,7 +163,7 @@ async function handleStripeEvent(event, stripe) {
         const placeholders = {
           name: user?.userName,
           amount: `$${amount.toFixed(2)}`,
-          dashboard_url: "https://iconaapp.com",
+          dashboard_url: "https://www.stealz.live",
           bank_name: transaction?.bank_name,
         };
 
