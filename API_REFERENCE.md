@@ -648,10 +648,18 @@ Response: `{ success: true, data: {} }`
 |--------|------|------|-------------|
 | GET | `/settings/` | JWT | Get app settings |
 | POST | `/settings/` | JWT | Save app settings |
-| GET | `/settings/keys` | JWT | Get Firebase keys |
+| GET | `/settings/keys` | Public | Get Firebase keys |
+
+`androidVersion` and `iosVersion` remain legacy display-version fields. Store the numeric minimum builds in `androidBuildNumber` and `iosBuildNumber` (for example, `"5"`).
 
 **GET /settings/keys**  
 Response: `{ firebase_api_key, firebase_auth_domain, firebase_project_id }`
+
+**GET /public/app-update** — Public, no Authentication required
+
+Returns a list containing one object with only: `forceUpdate`, `androidVersion`, `iosVersion`, `android_link`, and `ios_link`.
+
+The public response maps `androidBuildNumber` and `iosBuildNumber` to the legacy response names expected by Flutter. Numeric legacy version values are used only as a compatibility fallback.
 
 ---
 

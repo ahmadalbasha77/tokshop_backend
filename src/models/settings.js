@@ -73,6 +73,18 @@ const AppSettingsSchema = mongoose.Schema({
     type: String,
     default: "",
   },
+  androidBuildNumber: {
+    type: String,
+    default: "0",
+    trim: true,
+    match: [/^\d+$/, "Android build number must contain digits only"],
+  },
+  iosBuildNumber: {
+    type: String,
+    default: "0",
+    trim: true,
+    match: [/^\d+$/, "iOS build number must contain digits only"],
+  },
   FIREBASE_API_KEY: {
     type: String,
     default: "",

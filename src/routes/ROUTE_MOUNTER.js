@@ -47,6 +47,7 @@ router.get(
   "/settings/keys",
   settingsController.getFirebaseSettings
 );
+router.get("/public/app-update", settingsController.getPublicAppUpdate);
 // router.use("/users",  userRouter);
 router.use("/users/public/profile/:id", userController.publicProfile);
 router.get(

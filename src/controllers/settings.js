@@ -1,11 +1,45 @@
 const AppSettingsSchema = require("../models/settings");
 
 const SETTINGS_QUERY_TIMEOUT_MS = 10000;
+const BUILD_NUMBER_PATTERN = /^\d+$/;
+const PUBLIC_APP_UPDATE_FIELDS =
+  "forceUpdate androidBuildNumber iosBuildNumber androidVersion iosVersion android_link ios_link";
 const SETTINGS_UPDATE_FIELDS = new Set(
   Object.keys(AppSettingsSchema.schema.paths).filter(
     (field) => !["_id", "__v"].includes(field)
   )
 );
+
+function normalizeBuildNumber(value) {
+  const buildNumber = String(value ?? "").trim();
+  return BUILD_NUMBER_PATTERN.test(buildNumber) ? buildNumber : "0";
+}
+
+function resolveBuildNumber(dedicatedBuildNumber, legacyVersion) {
+  const buildNumber = normalizeBuildNumber(dedicatedBuildNumber);
+  return buildNumber !== "0"
+    ? buildNumber
+    : normalizeBuildNumber(legacyVersion);
+}
+
+function getPublicAppUpdate(settings) {
+  const data =
+    settings && typeof settings.toObject === "function"
+      ? settings.toObject()
+      : { ...(settings || {}) };
+
+  return {
+    forceUpdate: data.forceUpdate === true,
+    androidVersion: resolveBuildNumber(
+      data.androidBuildNumber,
+      data.androidVersion
+    ),
+    iosVersion: resolveBuildNumber(data.iosBuildNumber, data.iosVersion),
+    android_link:
+      typeof data.android_link === "string" ? data.android_link : "",
+    ios_link: typeof data.ios_link === "string" ? data.ios_link : "",
+  };
+}
 
 function getAllowedUpdates(body) {
   return Object.fromEntries(
@@ -50,6 +84,23 @@ exports.getAppSettings = async function (req, res) {
   } catch (error) {
     const response = getErrorResponse(error);
     console.error("Error fetching app settings:", error);
+    return res.status(response.status).json({
+      success: false,
+      message: response.message,
+    });
+  }
+};
+
+exports.getPublicAppUpdate = async function (req, res) {
+  try {
+    const settings = await AppSettingsSchema.findOne()
+      .select(PUBLIC_APP_UPDATE_FIELDS)
+      .maxTimeMS(SETTINGS_QUERY_TIMEOUT_MS);
+    res.set("Cache-Control", "no-store");
+    return res.status(200).json([getPublicAppUpdate(settings)]);
+  } catch (error) {
+    const response = getErrorResponse(error);
+    console.error("Error fetching public app update settings:", error);
     return res.status(response.status).json({
       success: false,
       message: response.message,

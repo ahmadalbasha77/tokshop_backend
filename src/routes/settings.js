@@ -4,4 +4,4 @@ const settingsRouter = express.Router();
 settingsRouter.route("/").post(settingsController.saveAppSettings);
 settingsRouter.route("/").get(settingsController.getAppSettings);
 settingsRouter.route("/keys").get(settingsController.getFirebaseSettings);
-module.exports = settingsRouter;  
+module.exports = settingsRouter;
