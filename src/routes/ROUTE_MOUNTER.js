@@ -106,6 +106,8 @@ router.use("/shipping",
 router.use("/products", 
   passport.authenticate("jwt", { session: false }),
    product);
+router.use("/admin/categories", requireAdminJson, category);
+router.use("/api/admin/categories", requireAdminJson, category);
 router.use("/category", passport.authenticate("jwt", { session: false }), category);
 router.use("/auction",
   passport.authenticate("jwt", { session: false }),
