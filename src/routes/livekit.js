@@ -76,16 +76,21 @@ router.post("/token/dynamic", async (req, res) => {
       canPublish = true;
     }
 
+    // Generate LiveKit tokens:
+    // - Host / Co-Host gets: canPublish = true, canSubscribe = true
+    // - Viewer gets: canPublish = false, canSubscribe = true
+    // There are no manual bandwidth limits or constraints set in the token grant code.
     const token = await mintDynamicToken(
       room,
       `${userId}:${uuid}`, // 🔑 UNIQUE IDENTITY
-      canPublish, userId
+      canPublish
     );
 
+    // Picture-in-Picture (PIP) token is always subscribe-only
     const piptoken = await mintDynamicToken(
       room,
       `${userId}:${uuid}:pip`,
-      false, userId
+      false
     );
     res.json({ url: livekit_url, token, piptoken, canPublish, sessionId: uuid, publishingSession: show.activeCameraSessionId });
   } catch (err) {
