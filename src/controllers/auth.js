@@ -16,6 +16,7 @@ const ReferralLog = require('../models/referral_log');
 const roomsModel = require("../models/room");
 const PendingRegistration = require("../models/pending_registration");
 const OtpRateLimit = require("../models/otp_rate_limit");
+const { validateNewUserReferral } = require("../shared/referral");
 
 const OTP_EXPIRY_MINUTES = 10;
 const OTP_COOLDOWN_SECONDS = 60;
@@ -428,14 +429,13 @@ async function createVerifiedEmailUser(pending, req, res) {
     account_type: pending.account_type || "email_password",
   };
 
-  let validReferral = false;
-  const { referredBy, clientIp } = registrationData;
-  if (referredBy && clientIp) {
-    const existingReferral = await ReferralLog.findOne({ ip: clientIp });
-    if (!existingReferral) {
-      validReferral = true;
-    }
-  }
+  const clientIp = getClientIp(req);
+  const referral = await validateNewUserReferral({
+    data: registrationData,
+    clientIp,
+    User: userModel,
+    ReferralLog,
+  });
 
   const settings = await functions.getSettings();
   const autoapprove = settings?.demoMode == true || settings?.seller_auto_approve == true;
@@ -444,13 +444,13 @@ async function createVerifiedEmailUser(pending, req, res) {
     password: pending.password_hash,
     seller: autoapprove,
     applied_seller: autoapprove,
-    referredBy: validReferral ? referredBy : undefined,
+    referredBy: referral.valid ? referral.referrer : undefined,
     emailVerified: true,
     email_verified: true,
     email_verified_at: new Date(),
   });
 
-  await createReferalLog(validReferral, referredBy, user, clientIp);
+  await createReferalLog(referral, user, clientIp);
 
   if (settings?.demoMode == true) {
     try {
@@ -538,9 +538,9 @@ exports.requestEmailVerification = async (req, res) => {
       ...req.body,
       email,
       account_type: accountType,
-      clientIp: req.body.clientIp || getClientIp(req),
     };
     delete registrationData.password;
+    delete registrationData.clientIp;
 
     await PendingRegistration.findOneAndUpdate(
       { email },
@@ -842,14 +842,13 @@ exports.authenticate = async (req, res) => {
       }
 
 
-      let validReferral = false;
-      const { referredBy, clientIp } = req.body;
-      if (referredBy && clientIp) {
-        const existingReferral = await ReferralLog.findOne({ ip: clientIp });
-        if (!existingReferral) {
-          validReferral = true;
-        }
-      }
+      const clientIp = getClientIp(req);
+      const referral = await validateNewUserReferral({
+        data: { ...req.body, email },
+        clientIp,
+        User: userModel,
+        ReferralLog,
+      });
       // Create new user for social login
       user = await userModel.create({
         email,
@@ -865,10 +864,11 @@ exports.authenticate = async (req, res) => {
         email_verified: true,
         email_verified_at: new Date(),
         seller: autoapprove,
-        applied_seller: autoapprove, referredBy: validReferral ? referredBy : undefined
+        applied_seller: autoapprove,
+        referredBy: referral.valid ? referral.referrer : undefined
       });
 
-      await createReferalLog(validReferral, referredBy, user, clientIp);
+      await createReferalLog(referral, user, clientIp);
       isNewUser = true;
     } else {
       await userModel.updateOne(
@@ -909,17 +909,29 @@ exports.authenticate = async (req, res) => {
   }
 };
 
-async function createReferalLog(validReferral, referredBy, user, clientIp) {
+async function createReferalLog(referral, user, clientIp) {
 
-  if (validReferral) {
-    await ReferralLog.create({
-      referrerId: new mongoose.Types.ObjectId(referredBy),
-      referredUserId: user?._id,
-      ip: clientIp
-    });
+  if (referral.valid) {
+    try {
+      await ReferralLog.create({
+        referrerId: referral.referrer,
+        referredUserId: user?._id,
+        referredEmail: user?.email,
+        ip: clientIp
+      });
+    } catch (error) {
+      if (error?.code === 11000) {
+        await userModel.updateOne(
+          { _id: user._id },
+          { $set: { referredBy: null } }
+        );
+        return;
+      }
+      throw error;
+    }
     // follow the referrer
     await userModel.updateOne(
-      { _id: referredBy },
+      { _id: referral.referrer },
       {
         $addToSet: { followers: user._id },
         $inc: { followingCount: 1 },
@@ -928,13 +940,13 @@ async function createReferalLog(validReferral, referredBy, user, clientIp) {
     await userModel.updateOne(
       { _id: user._id },
       {
-        $addToSet: { following: referredBy },
+        $addToSet: { following: referral.referrer },
         $inc: { followersCount: 1 },
       }
     );
     // get one room of the referredBy that is not ended and the soonest
     let room = await roomsModel.findOne({
-      owner: referredBy,
+      owner: referral.referrer,
       ended: false,
       started: false,
       date: { $gt: Date.now() }

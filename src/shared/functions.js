@@ -18,6 +18,7 @@ const bank = require("../models/bank");
 const category = require("../models/category");
 const socketEmitter = require("./socketEmitter");
 const logsModel = require("../models/activity_logs");
+const referralLogModel = require("../models/referral_log");
 
 const { stopEgress } = require("./livekit");
 const { sendPushNotification } = require("./send_notification");
@@ -116,6 +117,128 @@ function getOrderPopulates() {
     },
   ];
 }
+
+function hasVideoReceipt(value) {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+function docId(value) {
+  if (!value) return value;
+  return value._id || value;
+}
+
+function auctionReceiptTimingQuery(itemCreatedAt) {
+  if (!itemCreatedAt) return {};
+
+  const itemDate = new Date(itemCreatedAt);
+  if (Number.isNaN(itemDate.getTime())) return {};
+
+  const itemTime = itemDate.getTime();
+  const beforeItem = new Date(itemTime + 5 * 60 * 1000);
+  const afterRecentAuction = new Date(itemTime - 24 * 60 * 60 * 1000);
+
+  return {
+    startedTime: { $lte: beforeItem.getTime() },
+    $or: [
+      { endTime: { $gte: afterRecentAuction, $lte: beforeItem } },
+      { updatedAt: { $gte: afterRecentAuction, $lte: beforeItem } },
+    ],
+  };
+}
+
+async function findVideoReceiptForOrderItem(item) {
+  if (!item || hasVideoReceipt(item.videoReceipt)) return item?.videoReceipt || "";
+
+  if (hasVideoReceipt(item.egressId)) {
+    const auction = await auctionModel
+      .findOne({
+        egressId: item.egressId,
+        videoReceipt: { $exists: true, $nin: ["", null] },
+      })
+      .select("videoReceipt")
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    if (hasVideoReceipt(auction?.videoReceipt)) return auction.videoReceipt;
+  }
+
+  const orderType = item.ordertype || item.order?.ordertype;
+  if (orderType !== "auction" || !item.tokshow || !item.productId) {
+    return "";
+  }
+
+  const auction = await auctionModel
+    .findOne({
+      tokshow: docId(item.tokshow),
+      product: docId(item.productId),
+      videoReceipt: { $exists: true, $nin: ["", null] },
+      ...auctionReceiptTimingQuery(item.createdAt),
+    })
+    .select("videoReceipt")
+    .sort({ endTime: -1, updatedAt: -1 })
+    .lean();
+
+  return auction?.videoReceipt || "";
+}
+
+async function attachVideoReceiptToItem(item) {
+  if (!item) return item;
+
+  if (hasVideoReceipt(item.videoReceipt)) return item;
+
+  const videoReceipt = await findVideoReceiptForOrderItem(item);
+  item.videoReceipt = videoReceipt || "";
+
+  if (hasVideoReceipt(videoReceipt) && item._id) {
+    await itemModel.findByIdAndUpdate(item._id, { $set: { videoReceipt } });
+  }
+
+  return item;
+}
+
+async function attachVideoReceiptsToItems(items = []) {
+  await Promise.all(items.map((item) => attachVideoReceiptToItem(item)));
+  return items;
+}
+
+async function attachVideoReceiptsToOrders(orders = []) {
+  const list = Array.isArray(orders) ? orders : [orders];
+  await Promise.all(
+    list.map((order) => attachVideoReceiptsToItems(order?.items || []))
+  );
+  return orders;
+}
+
+async function syncAuctionVideoReceiptToItems(auction, videoReceipt) {
+  if (!auction || !hasVideoReceipt(videoReceipt)) return;
+
+  if (hasVideoReceipt(auction.egressId)) {
+    await itemModel.updateMany(
+      { egressId: auction.egressId },
+      { $set: { videoReceipt } }
+    );
+  }
+
+  if (!auction.tokshow || !auction.product) return;
+
+  const createdNearAuctionEnd = auction.endTime
+    ? {
+      $gte: new Date(new Date(auction.endTime).getTime() - 5 * 60 * 1000),
+      $lte: new Date(new Date(auction.endTime).getTime() + 24 * 60 * 60 * 1000),
+    }
+    : undefined;
+
+  const query = {
+    ordertype: "auction",
+    tokshow: docId(auction.tokshow),
+    productId: docId(auction.product),
+    $or: [{ videoReceipt: "" }, { videoReceipt: { $exists: false } }],
+  };
+
+  if (createdNearAuctionEnd) query.createdAt = createdNearAuctionEnd;
+
+  await itemModel.updateMany(query, { $set: { videoReceipt } });
+}
 wcOrder = async (payload, id) => {
   let user = await userModel.findOne({ _id: id });
   axios
@@ -175,6 +298,7 @@ async function createOrder({
   seller_shipping_fee_pay,
   carrierAccount,
   egressId,
+  videoReceipt = "",
   carrier = null,
   flash_sale = false,
   shipping = null,
@@ -220,10 +344,36 @@ async function createOrder({
   let commission = await getCommission(null, product);
   console.log(commission)
   const serviceFee = (subtotal * ((commission ?? 1) / 100)).toFixed(2);
-  console.log("allow_referal_discount", allow_referal_discount)
-  if (allow_referal_discount == true) {
-    referralDiscount = response.referral_credit;
-  }
+  const referralUser = await userModel
+    .findOne({
+      _id: buyer,
+      referredBy: { $ne: null },
+      awarded_referal_credit: { $ne: true },
+    })
+    .select("_id referredBy awarded_referal_credit")
+    .lean();
+  const referralRecord = referralUser
+    ? await referralLogModel.findOne({
+        referredUserId: referralUser._id,
+        referrerId: referralUser.referredBy,
+      }).lean()
+    : null;
+  const referralCredit = Number(response?.referral_credit || 0);
+  const referralCreditLimit = Number(response?.referral_credit_limit || 0);
+  const rewardedReferralCount = referralRecord && referralCreditLimit > 0
+    ? await referralLogModel.countDocuments({
+        referrerId: referralUser.referredBy,
+        rewardedAt: { $ne: null },
+      })
+    : 0;
+  const referralEligible =
+    Boolean(referralRecord) &&
+    Number.isFinite(referralCredit) &&
+    referralCredit > 0 &&
+    (referralCreditLimit <= 0 || rewardedReferralCount < referralCreditLimit);
+
+  // Referral value and eligibility are always server-derived.
+  referralDiscount = referralEligible ? Math.min(referralCredit, Number(subtotal) || 0) : 0;
   const stripe_fee =
     (parseFloat(response["stripe_fee"]) / 100) *
     (subtotal + parseFloat(tax) + parseFloat(shippingFee));
@@ -279,7 +429,7 @@ async function createOrder({
 
 
   // ================= ATTEMPT PAYMENT =================
-  const { charge, balanceTx, success, error } =
+  const { charge, balanceTx, success, error, referralDiscountApplied } =
     await chargeStripePaymentMethod(
       subtotal,
       paymentmethod,
@@ -291,6 +441,7 @@ async function createOrder({
       referralDiscount,
       buyer
     );
+  referralDiscount = referralDiscountApplied || 0;
 
 
   const payload = {
@@ -351,7 +502,8 @@ async function createOrder({
     width: productres?.shipping_profile?.width,
     shipping_fee: shippingFee,
     seller_shipping_fee_pay,
-    egressId
+    egressId,
+    videoReceipt: videoReceipt || ""
   };
 
   // ================= PAYMENT FAILED =================
@@ -864,6 +1016,7 @@ async function chargeStripePaymentMethod(
   buyer
 ) {
   let sellerdata = await userModel.findById(seller)
+  let referralClaimed = false;
   try {
     var response = await getSettings();
     const stripe = require("stripe")(response["stripeSecretKey"]);
@@ -907,7 +1060,16 @@ async function chargeStripePaymentMethod(
     const shippingCents = toCents(shippingFee ?? 0, "shippingFee");
     // const appFeeCents = toCents(serviceFee);
     const taxCents = toCents(tax ?? 0, "tax");
-    const referralDiscountCents = toCents(referralDiscount ?? 0, "referralDiscount");
+    let referralDiscountCents = toCents(referralDiscount ?? 0, "referralDiscount");
+    if (referralDiscountCents > 0 && paymentmethod?.userid) {
+      const claimedUser = await userModel.findOneAndUpdate(
+        { _id: paymentmethod.userid, awarded_referal_credit: { $ne: true } },
+        { $set: { awarded_referal_credit: true } },
+        { new: true }
+      );
+      referralClaimed = Boolean(claimedUser);
+      if (!referralClaimed) referralDiscountCents = 0;
+    }
 
     const totalChargeCents = amountCents + shippingCents + taxCents - referralDiscountCents;
     let payload = {
@@ -939,11 +1101,14 @@ async function chargeStripePaymentMethod(
       });
     }
     if (referralDiscountCents > 0 && paymentmethod?.userid) {
-      await userModel.findOneAndUpdate({ _id: paymentmethod?.userid }, { $set: { awarded_referal_credit: true } });
+      await referralLogModel.updateOne(
+        { referredUserId: paymentmethod.userid, rewardedAt: null },
+        { $set: { rewardedAt: new Date() } }
+      );
       await transactionModel.create({
         from: seller,
         to: paymentmethod?.userid,
-        amount: referralDiscount,
+        amount: referralDiscountCents / 100,
         status: "Completed",
         type: "referral_credit",
         reason: `Referral discount from order #${orderId}`,
@@ -955,9 +1120,16 @@ async function chargeStripePaymentMethod(
       paymentIntent: refreshedPI,
       charge: refreshedPI.latest_charge,
       balanceTx: refreshedPI?.latest_charge?.balance_transaction,
+      referralDiscountApplied: referralDiscountCents / 100,
       success: true
     };
   } catch (err) {
+    if (referralClaimed && paymentmethod?.userid) {
+      await userModel.updateOne(
+        { _id: paymentmethod.userid },
+        { $set: { awarded_referal_credit: false } }
+      ).catch(() => {});
+    }
     const rawPaymentIntent = err.raw?.payment_intent;
     const lastPaymentError = rawPaymentIntent?.last_payment_error;
     const paymentIntentId =
@@ -1891,6 +2063,7 @@ const createAuctionCharge = async (auction) => {
       seller_shipping_fee_pay,
       carrierAccount,
       egressId: auction?.egressId,
+      videoReceipt: aucres?.videoReceipt || auction?.videoReceipt || "",
       carrier,
       shipping: shipping_response,
       allow_referal_discount
@@ -2832,5 +3005,12 @@ module.exports = {
   populateRoomOptions,
   wcOrder,
   getCheapestUSPSRate,
-  auctionTimers, createGiveawaOrder, getOrderPopulates, saveLogs, retryOrderPayment
+  auctionTimers,
+  createGiveawaOrder,
+  getOrderPopulates,
+  saveLogs,
+  retryOrderPayment,
+  attachVideoReceiptsToItems,
+  attachVideoReceiptsToOrders,
+  syncAuctionVideoReceiptToItems
 };

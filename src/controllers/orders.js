@@ -354,6 +354,8 @@ exports.getItems = async (req, res) => {
       { $sort: { _id: -1 } }
     ]);
 
+    await functions.attachVideoReceiptsToItems(items);
+
     /* ===================== COUNT ===================== */
     const totalDocuments = await itemModel.countDocuments(match);
 
@@ -830,6 +832,7 @@ exports.getAllOrders = async (req, res) => {
       .skip(skip)
       .limit(limits)
       .populate(functions.getOrderPopulates());
+    await functions.attachVideoReceiptsToOrders(rawOrders);
     // if (customer) {
     pages = Math.ceil(totaldoc / limits);
     return res.send({
@@ -1129,9 +1132,7 @@ exports.addOrder = async (req, res) => {
     bundleId, seller_shipping_fee_pay,
     carrierAccount,
     carrier,
-    flash_sale = false,
-    referredBy = null,
-    referralDiscount= 0
+    flash_sale = false
   } = req.body;
   console.log("req.body ", req.body)
   try {
@@ -1164,8 +1165,7 @@ exports.addOrder = async (req, res) => {
       seller_shipping_fee_pay,
       carrierAccount,
       carrier,
-      flash_sale,
-      referralDiscount, referredBy
+      flash_sale
     });
     if (success == false) {
       console.log("error ", error, {
@@ -1647,6 +1647,7 @@ exports.getOrderById = async (req, res) => {
       .findById(req.params.orderId)
       .populate(functions.getOrderPopulates())
       .sort({ createdAt: -1 });
+    await functions.attachVideoReceiptsToOrders(order);
     res.status(200).json(order);
   } catch (error) {
     res

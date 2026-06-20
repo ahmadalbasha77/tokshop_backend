@@ -32,12 +32,14 @@ const pendingServiceTransactionsController = require("../controllers/pendingServ
 const adminReadController = require("../controllers/adminRead");
 const adminOrderPaymentsController = require("../controllers/adminOrderPayments");
 const adminPayoutsController = require("../controllers/adminPayouts");
+const publicShareRouter = require("./publicShare");
 
 require("../services/authenticate");
 
 const router = express.Router();
 
 router.use("/themes", themeRoutes);
+router.use("/share", publicShareRouter);
 router.use("/livekit", livekitPublic);
 router.use("/livekit",passport.authenticate("jwt", { session: false }),  livekitRouter);
 router.use("/auth", authRouter);

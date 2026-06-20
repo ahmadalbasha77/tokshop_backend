@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const { WebhookReceiver } = require("livekit-server-sdk");
-const { getSettings } = require("../shared/functions");
+const { getSettings, syncAuctionVideoReceiptToItems } = require("../shared/functions");
 const { createWinnerClip } = require("../shared/livekit");
 const auctionModel = require("../models/auction");
 const itemModel = require("../models/item");
@@ -59,10 +59,20 @@ router.post(
             { $set: { videoReceipt: clip.clipUrl } }
           );
 
+          const auctions = await auctionModel.find({
+            egressId: event.egressInfo.egressId,
+          });
+
           // Update the auction so that future items created get the receipt
           await auctionModel.updateMany(
             { egressId: event.egressInfo.egressId },
             { $set: { videoReceipt: clip.clipUrl } }
+          );
+
+          await Promise.all(
+            auctions.map((auction) =>
+              syncAuctionVideoReceiptToItems(auction, clip.clipUrl)
+            )
           );
         } else {
           console.log("❌ No fileResult found in egressInfo!");
