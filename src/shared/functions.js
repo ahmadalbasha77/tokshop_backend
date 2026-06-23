@@ -2195,44 +2195,6 @@ async function populateRoomOptions() {
     },
     {
       path: "activeauction",
-      populate: {
-        path: "bids",
-        populate: {
-          path: "user",
-          select: ["firstName", "lastName", "bio", "userName", "email"],
-        },
-      },
-    },
-    {
-      path: "activeauction",
-      populate: {
-        path: "product",
-        select: [
-          "_id",
-          "name",
-          "description",
-          "images",
-          "category",
-          "price",
-          "quantity",
-          "listing_type",
-        ],
-        populate: {
-          path: "shipping_profile",
-        }
-      },
-    },
-    {
-      path: "activeauction",
-      populate: {
-        path: "product",
-        populate: {
-          path: "category",
-        },
-      },
-    },
-    {
-      path: "activeauction",
       populate: [
         {
           path: "winner",
@@ -2244,15 +2206,32 @@ async function populateRoomOptions() {
         },
         {
           path: "owner",
+          select: "userName profilePhoto",
         },
         {
           path: "bids",
           populate: {
             path: "user",
-            select: "userName profilePhoto",
-          }
-
-        }
+            select: ["firstName", "lastName", "bio", "userName", "email", "profilePhoto"],
+          },
+        },
+        {
+          path: "product",
+          select: [
+            "_id",
+            "name",
+            "description",
+            "images",
+            "category",
+            "price",
+            "quantity",
+            "listing_type",
+          ],
+          populate: [
+            { path: "shipping_profile" },
+            { path: "category" }
+          ],
+        },
       ],
     },
 
@@ -2275,6 +2254,7 @@ async function getAuctionPopulateOptions() {
   return [
     { path: "winner" },
     { path: "winning" },
+    { path: "owner" },
     { path: "ownerId", select: ["address"] },
     {
       path: "bids",

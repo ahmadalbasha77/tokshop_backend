@@ -35,6 +35,10 @@ const auctionSchema = new Schema(
       type: Schema.Types.ObjectId,
       ref: "user",
     },
+    owner: {
+      type: Schema.Types.ObjectId,
+      ref: "user",
+    },
     bids: [
       {
         type: Schema.Types.ObjectId,

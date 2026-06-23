@@ -636,18 +636,23 @@ exports.getDeletedRoomById = async (req, res) => {
       ])
       .populate({
         path: "activeauction",
-        populate: {
-          path: "bids",
-          populate: {
-            path: "user",
+        populate: [
+          {
+            path: "bids",
+            populate: {
+              path: "user",
+            },
           },
-        },
-      })
-      .populate({
-        path: "activeauction",
-        populate: {
-          path: "winner",
-        },
+          {
+            path: "winner",
+          },
+          {
+            path: "winning",
+          },
+          {
+            path: "owner",
+          },
+        ],
       })
       .populate("raisedHands", [
         "firstName",
