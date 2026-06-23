@@ -62,6 +62,11 @@ router.get(
   requireAdminJson,
   adminPayoutsController.getStripePayouts
 );
+router.get(
+  "/admin/financial-logs",
+  requireAdminJson,
+  adminReadController.getFinancialLogs
+);
 router.get("/users", requireAdminJson, adminReadController.getUsers);
 router.get(
   "/users/stats/all",

@@ -1117,105 +1117,144 @@ exports.deleteWithdraw = async (req, res) => {
 
 exports.sendTip = async (req, res) => {
   const { from, to, reason, amount, tokshow } = req.body;
-  const paymentmethod = await paymentmethodModel.findOne({
-    userid: new mongoose.Types.ObjectId(from),
-    primary: true,
-  });
-  if (!paymentmethod) {
-    return res.json({ status: false, message: "No payment method found" });
-  }
-  var settingsresponse = await functions.getSettings();
-  const serviceFee = (parseFloat(settingsresponse['tip_processing']) / 100) * amount;
-  // Charge Stripe
-  const { charge, balanceTx, success, error } = await functions.chargeStripePaymentMethod(
-    amount,
-    paymentmethod,
-    null,
-    to,
-    serviceFee, 0, 0
-  );
+  try {
+    const paymentmethod = await paymentmethodModel.findOne({
+      userid: new mongoose.Types.ObjectId(from),
+      primary: true,
+    });
+    if (!paymentmethod) {
+      return res.json({ status: false, message: "No payment method found" });
+    }
+    var settingsresponse = await functions.getSettings();
+    const serviceFee = (parseFloat(settingsresponse['tip_processing']) / 100) * amount;
+    // Charge Stripe
+    const { charge, balanceTx, success, error } = await functions.chargeStripePaymentMethod(
+      amount,
+      paymentmethod,
+      null,
+      to,
+      serviceFee, 0, 0
+    );
 
-  if (success == false) {
-    return res.json({ success: success, message: error?.error });
-  }
-  const touser = await userModel.findByIdAndUpdate(
-    to,
-    { $inc: { walletPending: parseInt(amount) * 1 } },
-    { runValidators: true, new: true }
-  );
-
-
-
-  let newTransaction1 = {
-    from: from,
-    to: to,
-    reason: utils.Transactionreasons.RECEIVEDTIP,
-    amount: amount,
-    type: "tip",
-    deducting: false,
-    date: Date.now(),
-    status: "Pending",
-    paid_out: false,
-    payment_available: false,
-    chargeId: charge.id,
-    balanceTransactionId: charge.balance_transaction?.id,
-    availableOn: balanceTx?.available_on * 1000,
-  };
-
-  let t1 = new transactionModel(newTransaction1);
-  await t1.save();
-
-  const fromuser = await userModel.findByIdAndUpdate(from, {
-    runValidators: true,
-    new: true,
-  });
-  functions.saveActivity(
-    from,
-    "Received a Tip!",
-    "WalletScreen",
-    false,
-    fromuser.profilePhoto,
-    to,
-    "You have been tipped $" + amount + " by " + fromuser.firstName,
-    from
-  );
-
-  functions.saveActivity(
-    fromuser._id,
-    "Sent a Tip!",
-    "WalletScreen",
-    false,
-    touser.profilePhoto,
-    fromuser._id,
-    "You have sent a tip of $" + amount + " to " + touser.firstName,
-    touser._id
-  );
-
-  functions.sendNotification(
-    [touser.fcmToken],
-    "You have received a tip of $" + amount + " from " + fromuser.firstName,
-    "👋👋👋👋",
-    { screen: "ProfileScreen", id: touser._id?.toString() }
-  );
-  functions.sendNotification(
-    [fromuser.fcmToken],
-    "You have sent a tip of $" + amount + " to " + touser.firstName,
-    "👋👋👋👋",
-    { screen: "ProfileScreen", id: fromuser._id?.toString() }
-  );
-
-
-  //update room with total tipps
-  if (tokshow) {
-    await roomsModel.findByIdAndUpdate(
-      tokshow,
-      { $inc: { tipsTotal: parseInt(amount) * 1 } },
+    if (success == false) {
+      functions.saveLogs({
+        user: from,
+        log_data: JSON.stringify({
+          type: "TIP_PAYMENT_FAILED",
+          from: from,
+          to: to,
+          amount: amount,
+          errorCode: error?.code || null,
+          errorMessage: error?.error || error?.message || null,
+          message: "Tip payment failed"
+        })
+      });
+      return res.json({ success: success, message: error?.error });
+    }
+    const touser = await userModel.findByIdAndUpdate(
+      to,
+      { $inc: { walletPending: parseInt(amount) * 1 } },
       { runValidators: true, new: true }
     );
-  }
 
-  res.statusCode = 200;
-  res.json({ touser, success: success, message: "tip successfully sent" });
+    let newTransaction1 = {
+      from: from,
+      to: to,
+      reason: utils.Transactionreasons.RECEIVEDTIP,
+      amount: amount,
+      type: "tip",
+      deducting: false,
+      date: Date.now(),
+      status: "Pending",
+      paid_out: false,
+      payment_available: false,
+      chargeId: charge.id,
+      balanceTransactionId: charge.balance_transaction?.id,
+      availableOn: balanceTx?.available_on ? balanceTx.available_on * 1000 : Date.now(),
+    };
+
+    let t1 = new transactionModel(newTransaction1);
+    await t1.save();
+
+    // Log success
+    functions.saveLogs({
+      user: from,
+      log_data: JSON.stringify({
+        type: "TIP_PAYMENT_SUCCESS",
+        from: from,
+        to: to,
+        amount: amount,
+        chargeId: charge?.id,
+        balanceTransactionId: charge?.balance_transaction?.id || charge?.balance_transaction,
+        message: "Tip payment processed successfully"
+      })
+    });
+
+    const fromuser = await userModel.findByIdAndUpdate(from, {
+      runValidators: true,
+      new: true,
+    });
+    functions.saveActivity(
+      from,
+      "Received a Tip!",
+      "WalletScreen",
+      false,
+      fromuser.profilePhoto,
+      to,
+      "You have been tipped $" + amount + " by " + fromuser.firstName,
+      from
+    );
+
+    functions.saveActivity(
+      fromuser._id,
+      "Sent a Tip!",
+      "WalletScreen",
+      false,
+      touser.profilePhoto,
+      fromuser._id,
+      "You have sent a tip of $" + amount + " to " + touser.firstName,
+      touser._id
+    );
+
+    functions.sendNotification(
+      [touser.fcmToken],
+      "You have received a tip of $" + amount + " from " + fromuser.firstName,
+      "👋👋👋👋",
+      { screen: "ProfileScreen", id: touser._id?.toString() }
+    );
+    functions.sendNotification(
+      [fromuser.fcmToken],
+      "You have sent a tip of $" + amount + " to " + touser.firstName,
+      "👋👋👋👋",
+      { screen: "ProfileScreen", id: fromuser._id?.toString() }
+    );
+
+    //update room with total tipps
+    if (tokshow) {
+      await roomsModel.findByIdAndUpdate(
+        tokshow,
+        { $inc: { tipsTotal: parseInt(amount) * 1 } },
+        { runValidators: true, new: true }
+      );
+    }
+
+    res.statusCode = 200;
+    res.json({ touser, success: success, message: "tip successfully sent" });
+  } catch (err) {
+    console.error("sendTip error:", err);
+    functions.saveLogs({
+      user: from,
+      log_data: JSON.stringify({
+        type: "TIP_PAYMENT_FAILED",
+        from: from,
+        to: to,
+        amount: amount,
+        errorMessage: err.message || err.toString(),
+        message: "Tip payment failed due to exception"
+      })
+    });
+    return res.status(500).json({ success: false, message: err.message });
+  }
 };
 
 exports.editUserById = async (req, res) => {

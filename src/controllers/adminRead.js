@@ -3,6 +3,7 @@ const roomsModel = require("../models/room");
 const orderModel = require("../models/order");
 const itemModel = require("../models/item");
 const emailTemplateModel = require("../models/templates");
+const logsModel = require("../models/activity_logs");
 const { normalizePagination } = require("../shared/adminReadUtils");
 const { logAdminEndpointError } = require("../shared/adminRequestLog");
 
@@ -263,6 +264,50 @@ exports.getTemplates = async (req, res) => {
     const response = getDatabaseErrorResponse(
       error,
       "Failed to fetch email templates"
+    );
+    logAdminEndpointError(req, response.status, error);
+    return res.status(response.status).json({
+      success: false,
+      message: response.message,
+    });
+  }
+};
+
+exports.getFinancialLogs = async (req, res) => {
+  const { type } = req.query;
+  const { pages, limits, skip } = normalizePagination(
+    req.query.page,
+    req.query.limit
+  );
+  const query = {};
+
+  if (type) {
+    const escapedType = type.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    query.log_data = { $regex: `"type"\\s*:\\s*"${escapedType}"`, $options: "i" };
+  }
+
+  try {
+    const [totalDoc, logs] = await Promise.all([
+      logsModel.countDocuments(query).maxTimeMS(QUERY_TIMEOUT_MS),
+      logsModel
+        .find(query)
+        .skip(skip)
+        .populate("user", ["firstName", "lastName", "userName", "email", "profilePhoto"])
+        .sort("-_id")
+        .limit(limits)
+        .maxTimeMS(QUERY_TIMEOUT_MS),
+    ]);
+
+    return res.status(200).json({
+      logs: Array.isArray(logs) ? logs : [],
+      totalDoc: Number(totalDoc) || 0,
+      limits,
+      pages,
+    });
+  } catch (error) {
+    const response = getDatabaseErrorResponse(
+      error,
+      "Failed to fetch financial logs"
     );
     logAdminEndpointError(req, response.status, error);
     return res.status(response.status).json({

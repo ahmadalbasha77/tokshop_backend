@@ -4,6 +4,7 @@ const orderModel = require("../models/order");
 const transactionModel = require("../models/transaction");
 const userModel = require("../models/user");
 const { sendEmail } = require("./email");
+const { saveLogs } = require("./functions");
 
 function normalizeOrderIds(orderIds) {
   if (!Array.isArray(orderIds)) return [];
@@ -87,6 +88,9 @@ async function releaseEligibleOrderPayments({
 
     if (locked.modifiedCount === 0) continue;
 
+    let seller = null;
+    let totalAmount = 0;
+    let netAmount = 0;
     try {
       const claimedTransactions = await transactionModel.find({
         payout_batch_id: batchId,
@@ -100,17 +104,17 @@ async function releaseEligibleOrderPayments({
         continue;
       }
 
-      const seller = await userModel.findById(sellerId);
+      seller = await userModel.findById(sellerId);
       if (!seller?.stripe_account) {
         throw new Error(`Seller ${sellerId} does not have a Stripe account`);
       }
 
-      const totalAmount = claimedTransactions.reduce(
+      totalAmount = claimedTransactions.reduce(
         (sum, transaction) => sum + Number(transaction.amount || 0),
         0
       );
       const owed = Math.min(0, Number(seller.wallet || 0));
-      const netAmount = totalAmount + owed;
+      netAmount = totalAmount + owed;
 
       if (netAmount <= 0) {
         await transactionModel.updateMany(
@@ -137,6 +141,19 @@ async function releaseEligibleOrderPayments({
         },
         { idempotencyKey: `seller_release_${releaseKey}` }
       );
+
+      // Log success
+      saveLogs({
+        user: sellerId,
+        log_data: JSON.stringify({
+          type: "STRIPE_TRANSFER_SUCCESS",
+          transferId: transfer.id,
+          amount: netAmount,
+          destination: seller?.stripe_account,
+          status: "Completed",
+          message: "Stripe Connect payout transferred successfully"
+        })
+      });
 
       const updatedSeller = await userModel.findOneAndUpdate(
         { _id: sellerId },
@@ -190,6 +207,18 @@ async function releaseEligibleOrderPayments({
         { payout_batch_id: batchId },
         { $unset: { payout_batch_id: "" } }
       );
+      // Log failure
+      saveLogs({
+        user: sellerId,
+        log_data: JSON.stringify({
+          type: "STRIPE_TRANSFER_FAILED",
+          errorCode: error.code || null,
+          errorType: error.type || null,
+          errorMessage: error.message || error.toString(),
+          amount: typeof netAmount !== 'undefined' ? netAmount : null,
+          message: "Stripe Connect payout transfer failed"
+        })
+      });
       throw error;
     }
   }

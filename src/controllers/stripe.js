@@ -575,6 +575,15 @@ exports.stripeTransfer = async (req, res) => {
         destination: stripe_account,
       }, { idempotencyKey });
       if (transfer?.status == false) {
+        functions.saveLogs({
+          user: user,
+          log_data: JSON.stringify({
+            type: "MANUAL_TRANSFER_FAILED",
+            amount: originalAmount,
+            errorMessage: transfer?.message || "Transfer status is false",
+            message: "Manual transfer failed"
+          })
+        });
         await transactionModel.create({
           from: null,
           to: user,
@@ -623,6 +632,20 @@ exports.stripeTransfer = async (req, res) => {
       { $set: { paid_out: true, transferId: transfer?.id } }
     );
 
+    // Log success
+    functions.saveLogs({
+      user: user,
+      log_data: JSON.stringify({
+        type: "MANUAL_TRANSFER_SUCCESS",
+        transferId: transfer?.id,
+        amount: originalAmount,
+        netAmount: netAmount,
+        destination: payoutdata?.stripe_account,
+        status: "Completed",
+        message: "Manual transfer completed successfully"
+      })
+    });
+
     //create a transfer record
 
     return res.status(200).json({
@@ -635,6 +658,17 @@ exports.stripeTransfer = async (req, res) => {
       { _id: user },
       { $inc: { walletPending: originalAmount } }
     )
+    functions.saveLogs({
+      user: user,
+      log_data: JSON.stringify({
+        type: "MANUAL_TRANSFER_FAILED",
+        errorCode: err.code || null,
+        errorType: err.type || null,
+        errorMessage: err.message || err.toString(),
+        amount: typeof originalAmount !== 'undefined' ? originalAmount : null,
+        message: "Manual transfer failed with exception"
+      })
+    });
     return {
       message: err.message,
       status: false,

@@ -9,6 +9,9 @@ const bidModel = require("../models/bid");
 const userModel = require("../models/user");
 const giveaway = require("../models/giveaway");
 const socketEmitter = require("../shared/socketEmitter");
+const orderModel = require("../models/order");
+const webhookController = require("../controllers/webhookController");
+const { releaseEligibleOrderPayments } = require("./orderPaymentRelease");
 
 // Function to recreate repeating rooms
 async function recreateRepeatingRooms() {
@@ -261,5 +264,71 @@ async function closeScheduledGiveaways() {
     console.error("Giveaway Cron Error:", err);
   }
 }
+
+// 1. One-Time Database Repair for Corrupted Timestamps
+async function repairOldTransactions() {
+  try {
+    const transactionModel = require("../models/transaction");
+    const futureThreshold = Date.parse("2030-01-01");
+    
+    const stuckTxs = await transactionModel.find({
+      status: "Pending",
+      availableOn: { $gt: futureThreshold },
+      type: { $in: ["order", "tip"] }
+    });
+    
+    if (stuckTxs.length > 0) {
+      console.log(`🔧 Found ${stuckTxs.length} stuck transactions with year 58498 timestamps. Repairing...`);
+      for (const tx of stuckTxs) {
+        const createdAtTime = tx.createdAt ? new Date(tx.createdAt).getTime() : tx.date;
+        const baseTime = (createdAtTime && createdAtTime > 0) ? createdAtTime : (Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const estimatedAvailable = baseTime + 7 * 24 * 60 * 60 * 1000;
+        
+        tx.availableOn = Math.min(estimatedAvailable, Date.now());
+        await tx.save();
+      }
+      console.log("✅ Successfully repaired all corrupted transaction timestamps.");
+    }
+  } catch (error) {
+    console.error("❌ Error repairing old transactions:", error);
+  }
+}
+// Execute repair routine on server boot
+repairOldTransactions();
+
+// 2. Fallback Payout Cron Job (Runs every 10 minutes)
+cron.schedule("*/10 * * * *", async () => {
+  try {
+    console.log("⏰ Running fallback cleared transactions job...");
+    const settings = await functions.getSettings();
+    if (!settings?.stripeSecretKey) return;
+    const stripe = require("stripe")(settings.stripeSecretKey);
+    const webhookController = require("../controllers/webhookController");
+    const transactionModel = require("../models/transaction");
+    const { releaseEligibleOrderPayments } = require("./orderPaymentRelease");
+    
+    await webhookController.processClearedTransactions(stripe);
+    
+    const eligibleTxs = await transactionModel.find({
+      type: "order",
+      status: "Completed",
+      order_fulfilled: true,
+      payment_available: true,
+      paid_out: false,
+      to: { $ne: null }
+    });
+    
+    if (eligibleTxs.length > 0) {
+      const orderIds = [...new Set(eligibleTxs.map(tx => tx.orderId.toString()))];
+      await releaseEligibleOrderPayments({
+        orderIds,
+        stripeClient: stripe,
+        requireDelivered: true
+      });
+    }
+  } catch (error) {
+    console.error("❌ Fallback payout job error:", error);
+  }
+});
 
 module.exports = { recreateRepeatingRooms };

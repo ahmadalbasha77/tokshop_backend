@@ -954,7 +954,7 @@ async function finalizeOrder({
     to: order.seller,
     chargeId: charge?.id,
     balanceTransactionId: charge?.balance_transaction?.id,
-    availableOn: (balanceTx?.available_on ?? Date.now()) * 1000,
+    availableOn: balanceTx?.available_on ? balanceTx.available_on * 1000 : Date.now(),
     amount: earnings,
     total: subtotal,
     shippingFee: amount,
@@ -980,7 +980,7 @@ async function finalizeOrder({
     deducting: true,
     orderId: order._id,
     date: Date.now(),
-    availableOn: (balanceTx?.available_on ?? Date.now()) * 1000,
+    availableOn: balanceTx?.available_on ? balanceTx.available_on * 1000 : Date.now(),
   });
 
   if (productres?.tokshow) {
@@ -1097,7 +1097,7 @@ async function chargeStripePaymentMethod(
         deducting: true,
         orderId: orderId,
         date: Date.now(),
-        availableOn: (refreshedPI?.latest_charge?.balance_transaction?.available_on ?? Date.now()) * 1000
+        availableOn: refreshedPI?.latest_charge?.balance_transaction?.available_on ? refreshedPI.latest_charge.balance_transaction.available_on * 1000 : Date.now()
       });
     }
     if (referralDiscountCents > 0 && paymentmethod?.userid) {

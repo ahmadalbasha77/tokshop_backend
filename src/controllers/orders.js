@@ -592,24 +592,72 @@ exports.refundOrder = async (req, res) => {
           });
         } catch (error) {
           console.log("error ", error);
+          functions.saveLogs({
+            user: transaction?.to || req.user?._id,
+            log_data: JSON.stringify({
+              type: "ORDER_REFUND_FAILED",
+              chargeId: transaction.chargeId,
+              amount: deduuctingSellerWalletTotal,
+              errorCode: error.code || null,
+              errorType: error.type || null,
+              errorMessage: error.message || error.toString(),
+              message: "Stripe refund creation failed (partial amount)"
+            })
+          });
         }
         if (refund?.status == "succeeded") {
           refunded = true;
         } else {
+          functions.saveLogs({
+            user: transaction?.to || req.user?._id,
+            log_data: JSON.stringify({
+              type: "ORDER_REFUND_FAILED",
+              chargeId: transaction.chargeId,
+              amount: deduuctingSellerWalletTotal,
+              errorMessage: "Stripe refund status: " + (refund?.status || "unknown"),
+              message: "Refund status not succeeded (partial amount)"
+            })
+          });
           return res.json({ success: false, message: "Refund failed" })
         }
       } else {
         console.log(transaction);
         deduuctingSellerWalletTotal = parseFloat(transaction?.amount) + parseFloat(transaction?.tax || 0.0) + parseFloat(transaction?.shippingFee || 0.0);
         console.log(deduuctingSellerWalletTotal);
-        refund = await stripe.refunds.create({
-          charge: transaction.chargeId,
-          metadata: { orderId: itemId ? itemId.toString() : orderId.toString() },
-        });
+        try {
+          refund = await stripe.refunds.create({
+            charge: transaction.chargeId,
+            metadata: { orderId: itemId ? itemId.toString() : orderId.toString() },
+          });
+        } catch (error) {
+          console.log("error ", error);
+          functions.saveLogs({
+            user: transaction?.to || req.user?._id,
+            log_data: JSON.stringify({
+              type: "ORDER_REFUND_FAILED",
+              chargeId: transaction.chargeId,
+              amount: deduuctingSellerWalletTotal,
+              errorCode: error.code || null,
+              errorType: error.type || null,
+              errorMessage: error.message || error.toString(),
+              message: "Stripe refund creation failed (full amount)"
+            })
+          });
+        }
         console.log("refund ", refund);
         if (refund?.status == "succeeded") {
           refunded = true;
         } else {
+          functions.saveLogs({
+            user: transaction?.to || req.user?._id,
+            log_data: JSON.stringify({
+              type: "ORDER_REFUND_FAILED",
+              chargeId: transaction.chargeId,
+              amount: deduuctingSellerWalletTotal,
+              errorMessage: "Stripe refund status: " + (refund?.status || "unknown"),
+              message: "Refund status not succeeded (full amount)"
+            })
+          });
           return res.json({ success: false, message: "Refund failed" })
         }
 
@@ -622,6 +670,21 @@ exports.refundOrder = async (req, res) => {
         // deduct seller wallet
         await userModel.findByIdAndUpdate(transaction?.to, {
           $inc: { walletPending: -deduuctingSellerWalletTotal },
+        });
+
+        // Log success
+        functions.saveLogs({
+          user: transaction?.to || req.user?._id,
+          log_data: JSON.stringify({
+            type: "ORDER_REFUND_SUCCESS",
+            refundId: refund?.id,
+            chargeId: transaction.chargeId,
+            amount: deduuctingSellerWalletTotal,
+            userId: transaction?.to,
+            orderId: orderId || transaction?.orderId,
+            itemId: itemId || null,
+            message: "Order refund completed successfully"
+          })
         });
         if (itemId) {
           let item = await itemModel.findByIdAndUpdate(new mongoose.Types.ObjectId(itemId), {
@@ -652,6 +715,14 @@ exports.refundOrder = async (req, res) => {
     }
   } catch (e) {
     console.log(e)
+    functions.saveLogs({
+      user: transaction?.to || req.user?._id,
+      log_data: JSON.stringify({
+        type: "ORDER_REFUND_FAILED",
+        errorMessage: e.message || e.toString(),
+        message: "Refund process encountered an exception"
+      })
+    });
     return res.json({ success: false, message: e });
   }
 

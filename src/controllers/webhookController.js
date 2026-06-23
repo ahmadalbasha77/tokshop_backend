@@ -59,13 +59,11 @@ async function handleStripePlatformEvent(event, stripe) {
       console.log("💳 Charge succeeded:", event.data.object.id);
       break;
     case "balance.available":
-      console.log("💰 Balance available:", event.data.object, event.account);
       if (event.account) {
-        console.log("🔕 Ignoring connected account balance.available", event.account);
-        return;
+        await exports.processClearedTransactions(stripe, event.account);
+      } else {
+        await exports.processClearedTransactions(stripe);
       }
-      console.log("💰 Balance available:", event.data.object);
-      await processClearedTransactions(stripe);
       break;
     case "refund.updated":
       const refund = event.data.object;
@@ -204,14 +202,22 @@ async function syncConnectedAccountStatus(account) {
   });
 }
 
-async function processClearedTransactions(stripe) {
+exports.processClearedTransactions = async function (stripe, connectedAccountId = null) {
   // 1. Find cleared transactions
-  const clearedTxs = await transactionModel.find({
+  const query = {
     status: "Pending",
     availableOn: { $gte: CUTOFF_UTC_MS, $lte: Date.now() },
     to: { $ne: null },
     type: { $in: ["order", "tip"] }, paid_out: false
-  });
+  };
+
+  if (connectedAccountId) {
+    const seller = await userModel.findOne({ stripe_account: connectedAccountId });
+    if (!seller) return;
+    query.to = seller._id;
+  }
+
+  const clearedTxs = await transactionModel.find(query);
   console.log("Cleared transactions:", clearedTxs.length);
 
   if (clearedTxs.length) {
