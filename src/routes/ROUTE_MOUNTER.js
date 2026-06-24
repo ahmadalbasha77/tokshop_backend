@@ -78,6 +78,11 @@ router.get(
   requireAdminJson,
   pendingServiceTransactionsController.getPendingShippingServiceTransactions
 );
+router.post(
+  "/users/shipping/service/transfer",
+  requireAdminJson,
+  pendingServiceTransactionsController.transferShippingServiceFunds
+);
 router.get(
   "/orders/stats/all",
   requireAdminJson,

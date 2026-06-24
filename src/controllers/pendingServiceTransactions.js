@@ -57,3 +57,66 @@ exports.getPendingShippingServiceTransactions = async (req, res) => {
     });
   }
 };
+
+exports.transferShippingServiceFunds = async (req, res) => {
+  try {
+    const { type, amount } = req.body;
+
+    if (!isAllowedPendingServiceType(type)) {
+      return res.status(400).json({
+        success: false,
+        message: "type must be shipping_deduction or service_fee",
+      });
+    }
+
+    const requestedAmount = Number(amount);
+    if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "amount must be a positive number",
+      });
+    }
+
+    const filter = {
+      type,
+      status: "Pending",
+      paid_out: false,
+    };
+
+    const transactions = await transactionModel
+      .find(filter)
+      .lean()
+      .maxTimeMS(10000);
+
+    const sum = transactions.reduce((s, t) => s + (Number(t.amount) || 0), 0);
+
+    // Compare sums in cents to avoid floating point precision issues
+    if (Math.round(sum * 100) !== Math.round(requestedAmount * 100)) {
+      return res.status(400).json({
+        success: false,
+        message: `Amount mismatch. Requested: $${requestedAmount.toFixed(2)}, DB Sum: $${sum.toFixed(2)}`,
+      });
+    }
+
+    const ids = transactions.map(t => t._id);
+    if (ids.length > 0) {
+      await transactionModel.updateMany(
+        { _id: { $in: ids } },
+        { $set: { status: "Completed", paid_out: true } }
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `${type} funds cleared successfully.`,
+      count: ids.length,
+      amount: sum,
+    });
+  } catch (error) {
+    console.error("POST /users/shipping/service/transfer failed:", error.stack || error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to transfer/clear shipping service funds",
+    });
+  }
+};

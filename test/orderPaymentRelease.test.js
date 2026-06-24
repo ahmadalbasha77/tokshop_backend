@@ -28,6 +28,9 @@ let transferRecord = null;
 let emailCalls = [];
 
 mockModule("../src/models/settings", {});
+mockModule("../src/shared/functions", {
+  saveLogs() {},
+});
 mockModule("../src/models/order", {
   distinct(_field, filter) {
     assert.equal(filter.status, "delivered");

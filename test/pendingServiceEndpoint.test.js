@@ -7,6 +7,9 @@ let queryError = null;
 let lastFilter = null;
 let lastMaxTimeMS = null;
 
+let lastUpdateFilter = null;
+let lastUpdateData = null;
+
 require.cache[transactionModelPath] = {
   id: transactionModelPath,
   filename: transactionModelPath,
@@ -28,6 +31,11 @@ require.cache[transactionModelPath] = {
             : Promise.resolve(queryRows);
         },
       };
+    },
+    updateMany(filter, update) {
+      lastUpdateFilter = filter;
+      lastUpdateData = update;
+      return Promise.resolve({ modifiedCount: queryRows.length });
     },
   },
 };
@@ -156,6 +164,56 @@ void (async () => {
   );
   assert.equal(authResult.res.statusCode, 401);
   assert.equal(authResult.res.body.message, "Invalid or expired admin token");
+
+  // --- POST /users/shipping/service/transfer Tests ---
+  console.log("🏃 Running transferShippingServiceFunds tests...");
+  queryError = null;
+
+  // Mock response helper for transfer
+  async function requestTransfer(body) {
+    const res = createResponse();
+    await controller.transferShippingServiceFunds({ body }, res);
+    return res;
+  }
+
+  // Test 1: Successful transfer for service_fee
+  queryRows = [{ _id: "tx1", amount: 10.50 }, { _id: "tx2", amount: 2.00 }];
+  lastUpdateFilter = null;
+  lastUpdateData = null;
+
+  let transResponse = await requestTransfer({ type: "service_fee", amount: 12.50 });
+  assert.equal(transResponse.statusCode, 200);
+  assert.equal(transResponse.body.success, true);
+  assert.equal(transResponse.body.amount, 12.50);
+  assert.equal(transResponse.body.count, 2);
+  assert.deepEqual(lastUpdateFilter, { _id: { $in: ["tx1", "tx2"] } });
+  assert.deepEqual(lastUpdateData, { $set: { status: "Completed", paid_out: true } });
+
+  // Test 2: Invalid type validation
+  transResponse = await requestTransfer({ type: "order", amount: 12.50 });
+  assert.equal(transResponse.statusCode, 400);
+  assert.match(transResponse.body.message, /type must be shipping_deduction or service_fee/);
+
+  // Test 3: Invalid amount validation
+  transResponse = await requestTransfer({ type: "service_fee", amount: -5 });
+  assert.equal(transResponse.statusCode, 400);
+  assert.match(transResponse.body.message, /amount must be a positive number/);
+
+  // Test 4: Amount mismatch
+  queryRows = [{ _id: "tx1", amount: 10.00 }];
+  transResponse = await requestTransfer({ type: "service_fee", amount: 12.50 });
+  assert.equal(transResponse.statusCode, 400);
+  assert.match(transResponse.body.message, /Amount mismatch/);
+
+  // Test 5: Exception handling
+  const originalTransferConsoleError = console.error;
+  console.error = () => {};
+  queryError = new Error("database crash");
+  transResponse = await requestTransfer({ type: "service_fee", amount: 12.50 });
+  assert.equal(transResponse.statusCode, 500);
+  assert.equal(transResponse.body.message, "Failed to transfer/clear shipping service funds");
+  console.error = originalTransferConsoleError;
+  queryError = null;
 
   console.log("pending service endpoint tests passed");
 })().catch((error) => {
