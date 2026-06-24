@@ -62,6 +62,11 @@ router.get(
   requireAdminJson,
   adminPayoutsController.getStripePayouts
 );
+router.post(
+  "/admin/payouts/resolve-orphan",
+  requireAdminJson,
+  adminPayoutsController.resolveOrphanPayout
+);
 router.get(
   "/admin/financial-logs",
   requireAdminJson,
@@ -154,5 +159,6 @@ router.use("/notifications", passport.authenticate("jwt", { session: false }), n
 router.use("/admin",adminRouter);
 router.use("/templates", require("./templates"));
 router.use("/paypal", require("./paypal"));
+router.use("/logs", require("./applicationLog"));
 
 module.exports = router;

@@ -1,4 +1,5 @@
 const transactionModel = require("../models/transaction");
+const userModel = require("../models/user");
 const { logAdminEndpointError } = require("../shared/adminRequestLog");
 
 const QUERY_TIMEOUT_MS = 10000;
@@ -67,12 +68,21 @@ exports.getStripePayouts = async (req, res) => {
         .lean()
         .maxTimeMS(QUERY_TIMEOUT_MS),
     ]);
+    const processedPayouts = payouts.map(payout => {
+      if (!payout.from) {
+        payout.from = { userName: "Deleted User", email: "N/A", firstName: "Deleted", lastName: "User", profilePhoto: "" };
+      }
+      if (!payout.to) {
+        payout.to = { userName: "Deleted User", email: "N/A", firstName: "Deleted", lastName: "User", profilePhoto: "" };
+      }
+      return payout;
+    });
     const totalPages = Math.ceil(totalDocuments / limit);
 
     return res.status(200).json({
       success: true,
-      payouts,
-      transactions: payouts,
+      payouts: processedPayouts,
+      transactions: processedPayouts,
       totalDocuments,
       totalPages,
       currentPage: page,
@@ -91,6 +101,110 @@ exports.getStripePayouts = async (req, res) => {
       message: timedOut
         ? "Stripe payouts query timed out"
         : "Failed to fetch Stripe payouts",
+    });
+  }
+};
+
+exports.resolveOrphanPayout = async (req, res) => {
+  const { oldUserId, action, newUserId } = req.body;
+
+  if (!oldUserId || !action) {
+    return res.status(400).json({
+      success: false,
+      message: "oldUserId and action are required",
+    });
+  }
+
+  if (action !== "reassign" && action !== "cancel") {
+    return res.status(400).json({
+      success: false,
+      message: "action must be either 'reassign' or 'cancel'",
+    });
+  }
+
+  if (action === "reassign" && !newUserId) {
+    return res.status(400).json({
+      success: false,
+      message: "newUserId is required for reassign action",
+    });
+  }
+
+  try {
+    const todayStart = new Date("2026-02-26T00:00:00.000Z").getTime();
+    
+    const pendingTransactions = await transactionModel.find({
+      to: oldUserId,
+      payment_available: true,
+      paid_out: false,
+      type: "order",
+      status: "Completed",
+      itemId: { $exists: true },
+      chargeId: { $exists: true },
+      availableOn: { $gte: todayStart }
+    }).maxTimeMS(QUERY_TIMEOUT_MS);
+
+    if (pendingTransactions.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No pending payout transactions found for this user",
+      });
+    }
+
+    const transactionIds = pendingTransactions.map(t => t._id);
+    const totalAmount = pendingTransactions.reduce((sum, t) => sum + Number(t.amount || 0), 0);
+
+    if (action === "cancel") {
+      await transactionModel.updateMany(
+        { _id: { $in: transactionIds } },
+        { $set: { status: "Failed", payment_available: false } }
+      ).maxTimeMS(QUERY_TIMEOUT_MS);
+
+      return res.status(200).json({
+        success: true,
+        message: `Successfully cancelled ${pendingTransactions.length} transactions totaling $${totalAmount.toFixed(2)}`,
+        data: {
+          count: pendingTransactions.length,
+          totalAmount,
+        }
+      });
+    }
+
+    if (action === "reassign") {
+      const newUser = await userModel.findById(newUserId).maxTimeMS(QUERY_TIMEOUT_MS);
+      if (!newUser) {
+        return res.status(404).json({
+          success: false,
+          message: "New user not found",
+        });
+      }
+
+      await transactionModel.updateMany(
+        { _id: { $in: transactionIds } },
+        { $set: { to: newUserId } }
+      ).maxTimeMS(QUERY_TIMEOUT_MS);
+
+      await userModel.updateOne(
+        { _id: newUserId },
+        { $inc: { walletPending: totalAmount } }
+      ).maxTimeMS(QUERY_TIMEOUT_MS);
+
+      return res.status(200).json({
+        success: true,
+        message: `Successfully reassigned ${pendingTransactions.length} transactions totaling $${totalAmount.toFixed(2)} to user ${newUser.userName || newUserId}`,
+        data: {
+          count: pendingTransactions.length,
+          totalAmount,
+          newUserId,
+        }
+      });
+    }
+
+  } catch (error) {
+    logAdminEndpointError(req, 500, error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to resolve orphan payout transactions",
+      error: error.message
     });
   }
 };

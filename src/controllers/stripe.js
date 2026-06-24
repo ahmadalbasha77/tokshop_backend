@@ -1413,29 +1413,46 @@ exports.getdefaultPaymetmethod = async (req, res) => {
   res.status(200).json(updatedMethod);
 }
 exports.allPayoutTransactions = async (req, res) => {
-  // try {
-  let { limit = 10, page = 1, datefrom, dateto } = req.query;
-  let filter = {
-    type: "payout"
-  };
-  if (datefrom && dateto) {
-    filter.date = { $gte: new Date(datefrom), $lte: new Date(dateto) };
+  try {
+    let { limit = 10, page = 1, datefrom, dateto } = req.query;
+    let filter = {
+      type: "payout"
+    };
+    if (datefrom && dateto) {
+      filter.date = { $gte: new Date(datefrom), $lte: new Date(dateto) };
+    }
+
+    let totalDocuments = await transactionModel.countDocuments(filter);
+    let totalPages = Math.ceil(totalDocuments / limit);
+    let rawTransactions = await transactionModel
+      .find(filter)
+      .populate("from", "userName firstName lastName email profilePhoto")
+      .populate("to", "userName firstName lastName email profilePhoto")
+      .limit(limit)
+      .skip((page - 1) * limit)
+      .sort({ date: -1 })
+      .lean();
+
+    const transactions = rawTransactions.map(t => {
+      if (!t.from) {
+        t.from = { userName: "Deleted User", email: "N/A", firstName: "Deleted", lastName: "User", profilePhoto: "" };
+      }
+      if (!t.to) {
+        t.to = { userName: "Deleted User", email: "N/A", firstName: "Deleted", lastName: "User", profilePhoto: "" };
+      }
+      return t;
+    });
+
+    res.status(200).json({
+      transactions,
+      totalDocuments,
+      totalPages,
+      currentPage: page
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
-
-  let totalDocuments = await transactionModel.countDocuments(filter);
-  let totalPages = Math.ceil(totalDocuments / limit);
-  let transactions = await transactionModel.find(filter).limit(limit).skip((page - 1) * limit).sort({ date: -1 });
-  res.status(200).json({
-    transactions,
-    totalDocuments,
-    totalPages,
-    currentPage: page
-  });
-
-  // } catch (err) {
-  //   console.error(err);
-  //   res.status(500).json({ error: err.message });
-  // }
 };
 
 

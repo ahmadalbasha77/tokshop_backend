@@ -220,13 +220,13 @@ exports.pendingUserPayouts = async (req, res) => {
         as: "user"
       }
     },
-    { $unwind: "$user" },
+    { $unwind: { path: "$user", preserveNullAndEmptyArrays: true } },
     {
       $project: {
         _id: 0,
-        userId: "$user._id",
-        email: "$user.email",
-        userName: "$user.userName",
+        userId: { $ifNull: ["$user._id", "$_id"] },
+        email: { $ifNull: ["$user.email", "N/A"] },
+        userName: { $ifNull: ["$user.userName", "Deleted User"] },
         total: 1,
         count: 1,
         transactions: 1        // ✅ include raw transactions
