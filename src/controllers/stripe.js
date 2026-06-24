@@ -525,40 +525,71 @@ exports.stripeTransfer = async (req, res) => {
 
 
 
+  const batchId = new mongoose.Types.ObjectId().toString();
+
   try {
+    // 1. Lock the candidate transactions to prevent concurrent processing
+    const lockResult = await transactionModel.updateMany(
+      {
+        _id: { $in: ids },
+        paid_out: false,
+        payout_batch_id: { $exists: false }
+      },
+      { $set: { payout_batch_id: batchId } }
+    );
+
+    if (lockResult.modifiedCount === 0) {
+      return res.status(400).json({
+        response: "Transactions are already being processed or paid out.",
+        status: false
+      });
+    }
+
+    // 2. Lock user walletPending by decrementing the amount.
+    // Bypass strict $gte check to accommodate desynchronized balances.
     const locked = await userModel.findOneAndUpdate(
-      {
-        _id: user,
-        walletPending: { $gte: originalAmount }
-      },
-      {
-        $inc: {
-          walletPending: -originalAmount
-        }
-      },
+      { _id: user },
+      { $inc: { walletPending: -originalAmount } },
       { new: true }
-    )
+    );
 
     if (!locked) {
+      // Release transactions
+      await transactionModel.updateMany(
+        { payout_batch_id: batchId },
+        { $unset: { payout_batch_id: "" } }
+      );
       return res.status(400).json({
-        response: "Insufficient pending balance",
+        response: "User not found",
         status: false
-      })
+      });
     }
-    await userModel.updateOne(
-      { _id: user, walletPending: { $lt: 0.00001, $gt: -0.00001 } },
-      { $set: { walletPending: 0 } }
-    )
+
+    // Cap walletPending at 0 if the decrement made it negative or extremely close to 0
+    if (locked.walletPending < 0.00001) {
+      await userModel.updateOne(
+        { _id: user },
+        { $set: { walletPending: 0 } }
+      );
+    }
+
     const owed = Math.min(0, payoutdata.wallet || 0);
     const netAmount = originalAmount + owed;
     let transfer;
+
     if (netAmount > 0) {
       let stripeamount = Math.round(netAmount * 100);
       let stripe_account = payoutdata["stripe_account"];
       if (stripe_account == null) {
+        // Rollback walletPending
         await userModel.updateOne(
           { _id: user },
           { $inc: { walletPending: originalAmount } }
+        );
+        // Release transactions
+        await transactionModel.updateMany(
+          { payout_batch_id: batchId },
+          { $unset: { payout_batch_id: "" } }
         );
         return res.status(500).json({
           response: "Stripe account not found",
@@ -567,13 +598,13 @@ exports.stripeTransfer = async (req, res) => {
       }
       var response = await functions.getSettings();
       const stripe = require("stripe")(response["stripeSecretKey"]);
-      const batchId = new mongoose.Types.ObjectId().toString();
       const idempotencyKey = `manual_${user}_${batchId}`;
       transfer = await stripe.transfers.create({
         amount: stripeamount,
         currency: "usd",
         destination: stripe_account,
       }, { idempotencyKey });
+
       if (transfer?.status == false) {
         functions.saveLogs({
           user: user,
@@ -594,7 +625,17 @@ exports.stripeTransfer = async (req, res) => {
           deducting: false,
           date: Date.now(),
           transferId: transfer.id ?? null
-        })
+        });
+        // Rollback walletPending
+        await userModel.updateOne(
+          { _id: user },
+          { $inc: { walletPending: originalAmount } }
+        );
+        // Release transactions
+        await transactionModel.updateMany(
+          { payout_batch_id: batchId },
+          { $unset: { payout_batch_id: "" } }
+        );
         return res.status(500).json({
           response: transfer?.message,
           status: false,
@@ -611,25 +652,16 @@ exports.stripeTransfer = async (req, res) => {
         deducting: false,
         date: Date.now(),
         transferId: transfer?.id
-      })
+      });
     }
+
     //update wallet balance
-    await userModel.updateOne({ _id: user }, { $inc: { wallet: originalAmount } })
+    await userModel.updateOne({ _id: user }, { $inc: { wallet: originalAmount } });
 
-    //end email to user
-    const placeholders = {
-      name: payoutdata?.userName,
-      amount: "$" + originalAmount.toFixed(2)
-    };
-    console.log(placeholders);
-
-    // await sendEmail(placeholders, payoutdata.email, "payment_available");
-
-    // mark transaction as paid
-    // console.log(ids)
+    //mark transaction as paid and clear batch id
     await transactionModel.updateMany(
-      { _id: { $in: ids } },
-      { $set: { paid_out: true, transferId: transfer?.id } }
+      { payout_batch_id: batchId },
+      { $set: { paid_out: true, transferId: transfer?.id }, $unset: { payout_batch_id: "" } }
     );
 
     // Log success
@@ -646,18 +678,33 @@ exports.stripeTransfer = async (req, res) => {
       })
     });
 
-    //create a transfer record
-
     return res.status(200).json({
       response: "Transfer successful",
       status: true,
-    })
+    });
   } catch (err) {
-    console.log(err);
-    await userModel.updateOne(
-      { _id: user },
-      { $inc: { walletPending: originalAmount } }
-    )
+    console.error(err);
+
+    // Rollback walletPending
+    try {
+      await userModel.updateOne(
+        { _id: user },
+        { $inc: { walletPending: originalAmount } }
+      );
+    } catch (dbErr) {
+      console.error("Failed to rollback walletPending:", dbErr);
+    }
+
+    // Release transactions
+    try {
+      await transactionModel.updateMany(
+        { payout_batch_id: batchId },
+        { $unset: { payout_batch_id: "" } }
+      );
+    } catch (dbErr) {
+      console.error("Failed to release transactions:", dbErr);
+    }
+
     functions.saveLogs({
       user: user,
       log_data: JSON.stringify({
@@ -669,10 +716,11 @@ exports.stripeTransfer = async (req, res) => {
         message: "Manual transfer failed with exception"
       })
     });
-    return {
-      message: err.message,
+
+    return res.status(500).json({
+      response: err.message,
       status: false,
-    };
+    });
   }
 };
 
