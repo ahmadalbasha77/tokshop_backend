@@ -1694,7 +1694,7 @@ exports.updateOrderById = async (req, res) => {
       }
     }
 
-    if (status === "delivered") {
+    if (status === "shipped" || status === "delivered") {
       await releaseEligibleOrderPayments({
         orderIds: orders.map((order) => order._id),
       });

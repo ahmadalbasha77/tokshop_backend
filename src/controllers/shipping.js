@@ -7,6 +7,9 @@ const transactionModel = require("../models/transaction");
 const itemModel = require("../models/item");
 const roomsModel = require("../models/room");
 const functions = require("../shared/functions");
+const {
+  releaseEligibleOrderPayments,
+} = require("../shared/orderPaymentRelease");
 const { default: mongoose } = require("mongoose");
 const addressModel = require("../models/address");
 exports.getShipping = async (req, res) => {
@@ -332,6 +335,13 @@ async function processpayments(order) {
     { itemId: { $in: orderItems.map((i) => i._id) }, type: "order", paid_out: false },
     { $set: { order_fulfilled: true } }
   );
+  await itemModel.updateMany(
+    { orderId: order._id },
+    { $set: { status: order.status } }
+  );
+  await releaseEligibleOrderPayments({
+    orderIds: [order._id],
+  });
   console.log("transactions shippo", orderItems);
   // const transactions = await transactionModel.find({
   //   itemId: { $in: orderItems.map((i) => i._id) },
@@ -411,7 +421,8 @@ exports.webookShippo = async (req, res) => {
     console.log("status", status)
     let order = await orderModel.findOneAndUpdate(
       { tracking_number },
-      { status: "shipped", shipped_at: date }
+      { status: "shipped", shipped_at: date },
+      { new: true }
     ).populate("seller", "fcmToken").populate("buyer", "fcmToken");
 
     if (order) {
@@ -449,8 +460,12 @@ exports.webookShippo = async (req, res) => {
     // let tracking_number = '9200190396055700394600';
     let order = await orderModel.findOneAndUpdate(
       { tracking_number },
-      { status: "delivered", delivered_at: date }
+      { status: "delivered", delivered_at: date },
+      { new: true }
     );
+    if (order) {
+      await processpayments(order);
+    }
     functions.sendNotification(
       [order?.seller?.fcmToken],
       "Order Updated",

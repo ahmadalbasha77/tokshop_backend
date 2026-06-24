@@ -47,6 +47,212 @@ const sendStripeAccountAccessDenied = (res) =>
     message: "You cannot manage another user's Stripe account.",
   });
 
+const emptyStripeTransferStatus = () => ({
+  transfers: "inactive",
+  payouts_enabled: false,
+  disabled_reason: null,
+  currently_due: [],
+});
+
+const stripeTransferStatus = (stripeStatus) => ({
+  transfers: stripeStatus?.transfers || "inactive",
+  payouts_enabled: stripeStatus?.payouts_enabled === true,
+  disabled_reason: stripeStatus?.disabled_reason || null,
+  currently_due: stripeStatus?.currently_due || [],
+});
+
+const sendStripeTransferError = (
+  res,
+  {
+    statusCode,
+    code,
+    message,
+    nextAction,
+    stripeStatus = null,
+  }
+) =>
+  res.status(statusCode).json({
+    success: false,
+    code,
+    message,
+    next_action: nextAction,
+    stripe_status: stripeTransferStatus(
+      stripeStatus || emptyStripeTransferStatus()
+    ),
+  });
+
+const getStripeErrorDetails = (error) => ({
+  type: error?.type || error?.raw?.type || null,
+  code: error?.code || error?.raw?.code || null,
+  message: error?.message || error?.raw?.message || String(error),
+  requestId:
+    error?.requestId ||
+    error?.request_id ||
+    error?.raw?.requestId ||
+    error?.raw?.request_id ||
+    error?.headers?.["request-id"] ||
+    null,
+  statusCode:
+    error?.statusCode ||
+    error?.status_code ||
+    error?.raw?.statusCode ||
+    error?.raw?.status_code ||
+    null,
+});
+
+const logStripeTransferVerificationError = (user, error, classification) => {
+  const details = getStripeErrorDetails(error);
+  const payload = {
+    userId: user?._id?.toString() || null,
+    stripeAccount: user?.stripe_account || null,
+    error: {
+      type: details.type,
+      code: details.code,
+      message: details.message,
+      requestId: details.requestId,
+      statusCode: details.statusCode,
+    },
+    classification,
+  };
+
+  console.error("Stripe transfer account verification failed", payload);
+  functions.saveLogs({
+    user: user?._id,
+    log_data: JSON.stringify({
+      type: "STRIPE_TRANSFER_ACCOUNT_VERIFICATION_FAILED",
+      ...payload,
+    }),
+  });
+};
+
+const isMissingStripeAccountError = (error) => {
+  const details = getStripeErrorDetails(error);
+  return (
+    details.code === "resource_missing" ||
+    /no such account/i.test(details.message)
+  );
+};
+
+const isStripeAuthenticationError = (error) => {
+  const details = getStripeErrorDetails(error);
+  return (
+    details.type === "StripeAuthenticationError" ||
+    details.code === "api_key_expired" ||
+    details.statusCode === 401
+  );
+};
+
+const requireStripeTransferReady = async (res, user) => {
+  if (!user?.stripe_account) {
+    sendStripeTransferError(res, {
+      statusCode: 409,
+      code: "STRIPE_ACCOUNT_NOT_CONNECTED",
+      message: "The seller must connect a Stripe account before receiving transfers.",
+      nextAction: "RECONNECT_STRIPE",
+    });
+    return { ok: false };
+  }
+
+  let settings;
+  try {
+    settings = await functions.getSettings();
+  } catch (error) {
+    logStripeTransferVerificationError(user, error, "CONFIGURATION_LOOKUP_FAILED");
+    sendStripeTransferError(res, {
+      statusCode: 503,
+      code: "STRIPE_CONFIGURATION_UNAVAILABLE",
+      message: "Stripe configuration is unavailable. Please try again.",
+      nextAction: "RETRY",
+    });
+    return { ok: false };
+  }
+
+  if (!settings?.stripeSecretKey) {
+    const error = new Error("stripeSecretKey is not configured");
+    error.code = "STRIPE_CONFIGURATION_UNAVAILABLE";
+    logStripeTransferVerificationError(user, error, "MISSING_STRIPE_SECRET_KEY");
+    sendStripeTransferError(res, {
+      statusCode: 503,
+      code: "STRIPE_CONFIGURATION_UNAVAILABLE",
+      message: "Stripe configuration is unavailable. Please contact support.",
+      nextAction: "CONTACT_SUPPORT",
+    });
+    return { ok: false };
+  }
+
+  try {
+    const stripe = require("stripe")(settings.stripeSecretKey);
+    const account = await stripe.accounts.retrieve(user.stripe_account);
+    if (account?.deleted === true) {
+      const error = new Error(`No such account: ${user.stripe_account}`);
+      error.code = "resource_missing";
+      throw error;
+    }
+
+    const normalizedStatus = getStripeAccountStatus(account);
+    const transfersActive =
+      normalizedStatus.transfers === "active" ||
+      normalizedStatus.legacy_payments === "active";
+
+    if (!transfersActive) {
+      sendStripeTransferError(res, {
+        statusCode: 409,
+        code: "STRIPE_TRANSFERS_NOT_ACTIVE",
+        message: "The seller Stripe account cannot receive transfers yet.",
+        nextAction: "COMPLETE_STRIPE_ONBOARDING",
+        stripeStatus: normalizedStatus,
+      });
+      return { ok: false, stripeStatus: normalizedStatus };
+    }
+
+    return {
+      ok: true,
+      stripe,
+      account,
+      stripeStatus: normalizedStatus,
+    };
+  } catch (error) {
+    if (isMissingStripeAccountError(error)) {
+      logStripeTransferVerificationError(
+        user,
+        error,
+        "ACCOUNT_NOT_FOUND_OR_MODE_MISMATCH"
+      );
+      sendStripeTransferError(res, {
+        statusCode: 409,
+        code: "STRIPE_ACCOUNT_NOT_FOUND",
+        message: "The seller Stripe account no longer exists and must be reconnected.",
+        nextAction: "RECONNECT_STRIPE",
+      });
+      return { ok: false, error };
+    }
+
+    if (isStripeAuthenticationError(error)) {
+      logStripeTransferVerificationError(
+        user,
+        error,
+        "INVALID_STRIPE_SECRET_KEY"
+      );
+      sendStripeTransferError(res, {
+        statusCode: 503,
+        code: "STRIPE_CONFIGURATION_UNAVAILABLE",
+        message: "Stripe configuration is invalid. Please contact support.",
+        nextAction: "CONTACT_SUPPORT",
+      });
+      return { ok: false, error };
+    }
+
+    logStripeTransferVerificationError(user, error, "STRIPE_API_UNAVAILABLE");
+    sendStripeTransferError(res, {
+      statusCode: 503,
+      code: "STRIPE_API_UNAVAILABLE",
+      message: "Unable to verify the seller Stripe account right now. Please try again.",
+      nextAction: "RETRY",
+    });
+    return { ok: false, error };
+  }
+};
+
 const getAllowedOnboardingHosts = () => {
   const configuredHosts = String(
     process.env.STRIPE_ONBOARDING_ALLOWED_HOSTS || ""
@@ -488,11 +694,9 @@ exports.stripeTransfer = async (req, res) => {
   if (!payoutdata) {
     return res.status(404).json({ success: false, message: "User not found" });
   }
-  const profileStatus = checkSellerProfileComplete(payoutdata);
-  if (!profileStatus.complete) {
-    return sendIncompleteProfileResponse(res, profileStatus.missing_fields);
-  }
-  if (!(await requireActiveSellerStripe(res, payoutdata))) return;
+  const transferReadiness = await requireStripeTransferReady(res, payoutdata);
+  if (!transferReadiness.ok) return;
+  const { stripe, stripeStatus } = transferReadiness;
 
   const todayStart = new Date("2026-02-26T00:00:00.000Z").getTime();
   let transaction = await transactionModel.find({
@@ -596,8 +800,6 @@ exports.stripeTransfer = async (req, res) => {
           status: false,
         });
       }
-      var response = await functions.getSettings();
-      const stripe = require("stripe")(response["stripeSecretKey"]);
       const idempotencyKey = `manual_${user}_${batchId}`;
       transfer = await stripe.transfers.create({
         amount: stripeamount,
@@ -636,9 +838,12 @@ exports.stripeTransfer = async (req, res) => {
           { payout_batch_id: batchId },
           { $unset: { payout_batch_id: "" } }
         );
-        return res.status(500).json({
-          response: transfer?.message,
-          status: false,
+        return sendStripeTransferError(res, {
+          statusCode: 502,
+          code: "STRIPE_TRANSFER_FAILED",
+          message: transfer?.message || "Stripe transfer failed.",
+          nextAction: "RETRY",
+          stripeStatus,
         });
       }
 
@@ -717,9 +922,12 @@ exports.stripeTransfer = async (req, res) => {
       })
     });
 
-    return res.status(500).json({
-      response: err.message,
-      status: false,
+    return sendStripeTransferError(res, {
+      statusCode: 502,
+      code: "STRIPE_TRANSFER_FAILED",
+      message: err.message || "Stripe transfer failed.",
+      nextAction: "RETRY",
+      stripeStatus,
     });
   }
 };

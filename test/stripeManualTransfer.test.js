@@ -108,6 +108,17 @@ mockModule("../src/shared/sellerProfile", {
   checkSellerProfileComplete(user) {
     return { complete: true };
   },
+  getStripeAccountStatus(account) {
+    return {
+      charges_enabled: account.charges_enabled === true,
+      payouts_enabled: account.payouts_enabled === true,
+      card_payments: account.capabilities?.card_payments || "inactive",
+      transfers: account.capabilities?.transfers || "inactive",
+      legacy_payments: account.capabilities?.legacy_payments || "inactive",
+      disabled_reason: account.requirements?.disabled_reason || null,
+      currently_due: account.requirements?.currently_due || [],
+    };
+  },
   stripeRestrictionResponse(status) {
     return { success: false, message: "Stripe restricted" };
   }
@@ -145,6 +156,23 @@ const { stripeTransfer } = require("../src/controllers/stripe");
 
 // Mock Stripe API
 const mockStripe = {
+  accounts: {
+    retrieve(accountId) {
+      return Promise.resolve({
+        id: accountId,
+        charges_enabled: true,
+        payouts_enabled: true,
+        capabilities: {
+          card_payments: "active",
+          transfers: "active",
+        },
+        requirements: {
+          disabled_reason: null,
+          currently_due: [],
+        },
+      });
+    },
+  },
   transfers: {
     create(params) {
       if (params.destination === "acct_fail") {
@@ -248,9 +276,10 @@ void (async () => {
   await stripeTransfer(req, res);
 
   // Assertions:
-  assert.equal(res.statusCode, 500);
-  assert.equal(res.body.status, false);
-  assert.match(res.body.response, /Stripe Transfer Failed Mock/);
+  assert.equal(res.statusCode, 502);
+  assert.equal(res.body.success, false);
+  assert.equal(res.body.code, "STRIPE_TRANSFER_FAILED");
+  assert.match(res.body.message, /Stripe Transfer Failed Mock/);
 
   // walletPending should be rolled back to 2.00
   // (First decremented by 1.60 to 0.40, then rolled back +1.60 back to 2.00)

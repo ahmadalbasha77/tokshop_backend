@@ -10,7 +10,7 @@ function mockModule(relativePath, exports) {
   };
 }
 
-let deliveredOrderIds = ["order-1"];
+let eligibleOrderIds = ["order-1"];
 let candidates = [
   {
     _id: "transaction-1",
@@ -33,8 +33,8 @@ mockModule("../src/shared/functions", {
 });
 mockModule("../src/models/order", {
   distinct(_field, filter) {
-    assert.equal(filter.status, "delivered");
-    return Promise.resolve(deliveredOrderIds);
+    assert.deepEqual(filter.status, { $in: ["shipped", "delivered"] });
+    return Promise.resolve(eligibleOrderIds);
   },
 });
 mockModule("../src/models/transaction", {
@@ -151,12 +151,12 @@ void (async () => {
   assert.deepEqual(duplicateResult, []);
   assert.equal(transferCalls.length, 1);
 
-  deliveredOrderIds = [];
-  const notDeliveredResult = await releaseEligibleOrderPayments({
+  eligibleOrderIds = [];
+  const notShippedOrDeliveredResult = await releaseEligibleOrderPayments({
     orderIds: ["order-2"],
     stripeClient,
   });
-  assert.deepEqual(notDeliveredResult, []);
+  assert.deepEqual(notShippedOrDeliveredResult, []);
   assert.equal(transferCalls.length, 1);
 
   console.log("order payment release tests passed");

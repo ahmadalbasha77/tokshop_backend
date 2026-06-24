@@ -6,6 +6,8 @@ const userModel = require("../models/user");
 const { sendEmail } = require("./email");
 const { saveLogs } = require("./functions");
 
+const RELEASE_ELIGIBLE_ORDER_STATUSES = ["shipped", "delivered"];
+
 function normalizeOrderIds(orderIds) {
   if (!Array.isArray(orderIds)) return [];
   return [...new Set(orderIds.filter(Boolean).map((id) => id.toString()))];
@@ -47,7 +49,9 @@ async function releaseEligibleOrderPayments({
   const orderFilter = {
     _id: { $in: normalizedOrderIds },
   };
-  if (requireDelivered) orderFilter.status = "delivered";
+  if (requireDelivered) {
+    orderFilter.status = { $in: RELEASE_ELIGIBLE_ORDER_STATUSES };
+  }
 
   const eligibleOrderIds = await orderModel.distinct("_id", orderFilter);
   if (!eligibleOrderIds.length) return [];
