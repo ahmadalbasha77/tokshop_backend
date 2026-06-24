@@ -27,7 +27,11 @@ exports.handleStripeWebhook = async (req, res) => {
     console.error("⚠️ Webhook signature verification failed:", err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
-  await handleStripeEvent(event, stripe);
+  try {
+    await handleStripeEvent(event, stripe);
+  } catch (err) {
+    console.error("❌ Error processing Stripe webhook event:", err);
+  }
   res.status(200).json({ received: true });
 };
 exports.handleStripePlatformWebhook = async (req, res) => {
@@ -46,7 +50,11 @@ exports.handleStripePlatformWebhook = async (req, res) => {
     console.error("⚠️ Webhook signature verification failed:", err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
-  await handleStripePlatformEvent(event, stripe);
+  try {
+    await handleStripePlatformEvent(event, stripe);
+  } catch (err) {
+    console.error("❌ Error processing Stripe platform webhook event:", err);
+  }
   res.status(200).json({ received: true });
 };
 async function handleStripePlatformEvent(event, stripe) {

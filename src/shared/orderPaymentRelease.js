@@ -73,6 +73,7 @@ async function releaseEligibleOrderPayments({
 
   const stripe = stripeClient || (await getStripeClient());
   const releases = [];
+  let lastError = null;
 
   for (const [sellerId, sellerTransactions] of grouped.entries()) {
     const batchId = crypto.randomUUID();
@@ -106,7 +107,13 @@ async function releaseEligibleOrderPayments({
 
       seller = await userModel.findById(sellerId);
       if (!seller?.stripe_account) {
-        throw new Error(`Seller ${sellerId} does not have a Stripe account`);
+        await transactionModel.updateMany(
+          { payout_batch_id: batchId },
+          { $unset: { payout_batch_id: "" } }
+        );
+        const err = new Error(`Seller ${sellerId} does not have a Stripe account`);
+        err.code = "SELLER_STRIPE_ACCOUNT_REQUIRED";
+        throw err;
       }
 
       totalAmount = claimedTransactions.reduce(
@@ -203,24 +210,53 @@ async function releaseEligibleOrderPayments({
       });
       await sendPaymentAvailableEmail(seller, netAmount);
     } catch (error) {
-      await transactionModel.updateMany(
-        { payout_batch_id: batchId },
-        { $unset: { payout_batch_id: "" } }
-      );
-      // Log failure
-      saveLogs({
-        user: sellerId,
-        log_data: JSON.stringify({
-          type: "STRIPE_TRANSFER_FAILED",
-          errorCode: error.code || null,
-          errorType: error.type || null,
-          errorMessage: error.message || error.toString(),
-          amount: typeof netAmount !== 'undefined' ? netAmount : null,
-          message: "Stripe Connect payout transfer failed"
-        })
-      });
-      throw error;
+      if (error.code === "resource_missing") {
+        // Mark transactions as Failed in database to exclude them from future retries
+        await transactionModel.updateMany(
+          { payout_batch_id: batchId },
+          { $set: { status: "Failed" }, $unset: { payout_batch_id: "" } }
+        );
+        // Clear user's missing/deleted Stripe Connect account details to deactivate integration
+        await userModel.updateOne(
+          { _id: sellerId },
+          {
+            $set: {
+              stripe_account: null,
+              stripe_status_code: "",
+              stripe_verification_pending: false,
+              stripe_status_updated_at: new Date()
+            }
+          }
+        );
+      } else {
+        // For transient errors, unlock transactions so they can be processed on next cron run
+        await transactionModel.updateMany(
+          { payout_batch_id: batchId },
+          { $unset: { payout_batch_id: "" } }
+        );
+      }
+
+      // Log failure (skip saving logs if it is just a missing Stripe Connect configuration locally)
+      if (error.code !== "SELLER_STRIPE_ACCOUNT_REQUIRED") {
+        saveLogs({
+          user: sellerId,
+          log_data: JSON.stringify({
+            type: "STRIPE_TRANSFER_FAILED",
+            errorCode: error.code || null,
+            errorType: error.type || null,
+            errorMessage: error.message || error.toString(),
+            amount: typeof netAmount !== 'undefined' ? netAmount : null,
+            message: "Stripe Connect payout transfer failed"
+          })
+        });
+      }
+
+      lastError = error;
     }
+  }
+
+  if (releases.length === 0 && lastError && grouped.size === 1) {
+    throw lastError;
   }
 
   return releases;
