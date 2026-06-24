@@ -1,7 +1,7 @@
 const express = require("express");
 const passport = require("passport");
 const controller = require("../controllers/applicationLog");
-const { requireAdminJson } = require("../services/adminJsonAuth");
+const requireAdminJson = require("../services/adminJsonAuth");
 
 const router = express.Router();
 
