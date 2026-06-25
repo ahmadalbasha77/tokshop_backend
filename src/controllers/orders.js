@@ -813,7 +813,6 @@ exports.getAllOrders = async (req, res) => {
     if (invoice) queryObject.invoice = parseInt(invoice);
     if (customer) queryObject.customer = customer;
     if (userId) queryObject.seller = userId;
-    if (day) queryObject.createdAt = { $gte: date, $lte: today };
     if (tokshow) queryObject.tokshow = tokshow;
     if (platform_order == "true") queryObject.platform_order = true;
     // if(platform_order == "false") queryObject.platform_order = false;
