@@ -811,8 +811,15 @@ exports.getAllOrders = async (req, res) => {
       $and: [{ customer: { $exists: true, $ne: null } }, { seller: { $exists: true, $ne: null } }],
     };
     if (invoice) queryObject.invoice = parseInt(invoice);
-    if (customer) queryObject.customer = customer;
-    if (userId) queryObject.seller = userId;
+    if (customer && userId && customer.toString() === userId.toString()) {
+      // Same identity sent as both customer and userId (e.g. mobile app
+      // scoping "my orders" by the logged-in user's id) means "orders
+      // where I'm the customer OR the seller", not both at once.
+      queryObject.$or = [{ customer }, { seller: userId }];
+    } else {
+      if (customer) queryObject.customer = customer;
+      if (userId) queryObject.seller = userId;
+    }
     if (tokshow) queryObject.tokshow = tokshow;
     if (platform_order == "true") queryObject.platform_order = true;
     // if(platform_order == "false") queryObject.platform_order = false;
