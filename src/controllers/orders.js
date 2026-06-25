@@ -962,10 +962,11 @@ exports.getAllOrders = async (req, res) => {
       total: totaldoc,
     });
   } catch (error) {
-    res
-      .status(422)
-      .setHeader("Content-Type", "application/json")
-      .json(error.message);
+    console.error("GET /orders error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fetch orders",
+    });
   }
 };
 
