@@ -15,6 +15,49 @@ const {
 var mongoose = require("mongoose");
 const axios = require("axios");
 const functions = require("../shared/functions");
+
+const packageDimensionFields = ["weight", "height", "length", "width"];
+
+function toPlainResponseObject(value) {
+  if (!value) return value;
+  if (typeof value.toObject === "function") {
+    return value.toObject();
+  }
+  return value;
+}
+
+function normalizePackageDimensions(entity) {
+  if (!entity || typeof entity !== "object" || entity instanceof mongoose.Types.ObjectId) {
+    return entity;
+  }
+
+  packageDimensionFields.forEach((field) => {
+    entity[field] = entity[field] == null ? "" : String(entity[field]);
+  });
+
+  return entity;
+}
+
+function normalizeOrderResponse(order) {
+  const normalizedOrder = toPlainResponseObject(order);
+  if (!normalizedOrder || typeof normalizedOrder !== "object") return normalizedOrder;
+
+  normalizePackageDimensions(normalizedOrder);
+
+  if (Array.isArray(normalizedOrder.items)) {
+    normalizedOrder.items = normalizedOrder.items.map((item) =>
+      normalizePackageDimensions(toPlainResponseObject(item))
+    );
+  }
+
+  return normalizedOrder;
+}
+
+function normalizeOrdersResponse(orders) {
+  return Array.isArray(orders)
+    ? orders.map((order) => normalizeOrderResponse(order))
+    : normalizeOrderResponse(orders);
+}
 exports.getDisputes = async (req, res) => {
   try {
     const disputes = await dispute
@@ -209,7 +252,7 @@ exports.bundleOrders = async (req, res) => {
     res.json({
       message: `✅ Combined ${orders.length} orders into one bundle.`,
       bundleId,
-      newOrder: savedBundle,
+      newOrder: normalizeOrderResponse(savedBundle),
     });
   } catch (err) {
     console.error("❌ bundleOrders error:", err);
@@ -466,8 +509,8 @@ exports.unbundleOrders = async (req, res) => {
     }
     res.json({
       message: `Unbundled ${unbundledItems.length} item(s), updated remaining bundle.`,
-      newOrders,
-      updatedBundle: remainingItems.length ? parentOrder : null,
+      newOrders: normalizeOrdersResponse(newOrders),
+      updatedBundle: remainingItems.length ? normalizeOrderResponse(parentOrder) : null,
     });
   } catch (err) {
     console.error("❌ unbundleOrders error:", err);
@@ -751,7 +794,7 @@ exports.disputeOrder = async (req, res) => {
     }
   );
 
-  res.json(order);
+  res.json(normalizeOrderResponse(order));
 }
 exports.updateOrderDispute = async (req, res) => {
   const { orderId } = req.params;
@@ -913,7 +956,7 @@ exports.getAllOrders = async (req, res) => {
     // if (customer) {
     pages = Math.ceil(totaldoc / limits);
     return res.send({
-      orders: rawOrders,
+      orders: normalizeOrdersResponse(rawOrders),
       limits,
       pages,
       total: totaldoc,
@@ -1096,7 +1139,7 @@ exports.getDashboardOrdersAdmin = async (req, res) => {
         totalAmount.length === 0
           ? 0
           : parseFloat(totalAmount[0].tAmount).toFixed(2),
-      todayOrder: todayOrder,
+      todayOrder: normalizeOrdersResponse(todayOrder),
       totalAmountOfThisMonth:
         totalAmountOfThisMonth.length === 0
           ? 0
@@ -1105,8 +1148,8 @@ exports.getDashboardOrdersAdmin = async (req, res) => {
         totalPendingOrder.length === 0 ? 0 : totalPendingOrder[0],
       totalDeliveredOrder:
         totalDeliveredOrder.length === 0 ? 0 : totalDeliveredOrder[0].count,
-      orders,
-      weeklySaleReport,
+      orders: normalizeOrdersResponse(orders),
+      weeklySaleReport: normalizeOrdersResponse(weeklySaleReport),
     });
   } catch (err) {
     res.status(500).send({
@@ -1165,7 +1208,7 @@ exports.getAllOrdersByUserId = async (req, res) => {
       .limit(10)
       .sort({ date: -1 });
 
-    res.status(200).setHeader("Content-Type", "application/json").json(orders);
+    res.status(200).setHeader("Content-Type", "application/json").json(normalizeOrdersResponse(orders));
   } catch (error) {
     res
       .status(422)
@@ -1180,7 +1223,7 @@ exports.getOrderByProductId = async (req, res) => {
       .find({ productIds: req.params.productId })
       .populate("productId")
       .populate("reviews");
-    res.status(200).setHeader("Content-Type", "application/json").json(orders);
+    res.status(200).setHeader("Content-Type", "application/json").json(normalizeOrdersResponse(orders));
   } catch (error) {
     res
       .status(422)
@@ -1308,8 +1351,8 @@ exports.addOrder = async (req, res) => {
     // If successful, return JSON
     return res.status(200).json({
       success,
-      newOrder,
-      newItem,
+      newOrder: normalizeOrderResponse(newOrder),
+      newItem: normalizePackageDimensions(toPlainResponseObject(newItem)),
     });
   } catch (error) {
     console.log(error);
@@ -1420,7 +1463,7 @@ exports.cancelOrder = async (req, res) => {
         return res.status(200).json({
           success: true,
           message: "Order cancellation request initiated successfully",
-          orderItem,
+          orderItem: normalizePackageDimensions(toPlainResponseObject(orderItem)),
         });
       }
       if (type == "order") {
@@ -1444,7 +1487,7 @@ exports.cancelOrder = async (req, res) => {
         return res.status(200).json({
           success: true,
           message: "Order cancellation request initiated successfully",
-          orderData,
+          orderData: normalizeOrderResponse(orderData),
         });
       }
     }
@@ -1634,7 +1677,7 @@ exports.cancelOrder = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Order item cancelled successfully",
-      orderItem
+      orderItem: normalizePackageDimensions(toPlainResponseObject(orderItem))
     });
 
 
@@ -1687,7 +1730,7 @@ exports.updateOrderById = async (req, res) => {
     }
 
     // respond with updated orders
-    
+
     // If manually marking as shipped or delivered, we need to fulfill the transaction so the seller gets paid
     if (status === "shipped" || status === "delivered") {
       for (const o of orders) {
@@ -1706,7 +1749,7 @@ exports.updateOrderById = async (req, res) => {
       });
     }
 
-    return res.status(200).json(bundleId ? orders : orders[0]);
+    return res.status(200).json(bundleId ? normalizeOrdersResponse(orders) : normalizeOrderResponse(orders[0]));
   } catch (error) {
     console.log(error);
     if (error.raw) {
@@ -1725,7 +1768,7 @@ exports.getOrderById = async (req, res) => {
       .populate(functions.getOrderPopulates())
       .sort({ createdAt: -1 });
     await functions.attachVideoReceiptsToOrders(order);
-    res.status(200).json(order);
+    res.status(200).json(normalizeOrderResponse(order));
   } catch (error) {
     res
       .status(422)
@@ -1961,7 +2004,7 @@ exports.retryPayment = async (req, res) => {
     const { orderid } = req.params;
     const orders = await functions.retryOrderPayment(orderid);
     console.log(orders)
-    res.status(200).json(orders);
+    res.status(200).json(normalizeOrdersResponse(orders));
   } catch (error) {
     console.log(error)
     res.status(500).json({
