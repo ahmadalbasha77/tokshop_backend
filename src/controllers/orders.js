@@ -878,8 +878,7 @@ exports.getAllOrders = async (req, res) => {
         return res.send({
           orders: [],
           limits,
-          pages,
-          totalPages: 0,
+          pages: 0,
           total: 0,
         });
       }
@@ -912,12 +911,11 @@ exports.getAllOrders = async (req, res) => {
       .populate(functions.getOrderPopulates());
     await functions.attachVideoReceiptsToOrders(rawOrders);
     // if (customer) {
-    const totalPages = Math.ceil(totaldoc / limits);
+    pages = Math.ceil(totaldoc / limits);
     return res.send({
       orders: rawOrders,
       limits,
       pages,
-      totalPages,
       total: totaldoc,
     });
   } catch (error) {
