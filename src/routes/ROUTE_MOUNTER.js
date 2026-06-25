@@ -94,6 +94,11 @@ router.get(
   adminReadController.getOrderStats
 );
 router.get(
+  "/admin/orders/diagnostics",
+  requireAdminJson,
+  adminReadController.getOrdersDiagnostics
+);
+router.get(
   "/admin/orders/:orderId/payment-release",
   requireAdminJson,
   adminOrderPaymentsController.getOrderFundsStatus

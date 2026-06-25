@@ -253,6 +253,130 @@ exports.getOrderStats = async (req, res) => {
   }
 };
 
+exports.getOrdersDiagnostics = async (req, res) => {
+  const { sellerEmail, customerEmail } = req.query;
+
+  try {
+    const [totalOrders, missingCustomer, missingSeller, recentOrders] =
+      await Promise.all([
+        orderModel.countDocuments({}).maxTimeMS(QUERY_TIMEOUT_MS),
+        orderModel
+          .countDocuments({
+            $or: [{ customer: { $exists: false } }, { customer: null }],
+          })
+          .maxTimeMS(QUERY_TIMEOUT_MS),
+        orderModel
+          .countDocuments({
+            $or: [{ seller: { $exists: false } }, { seller: null }],
+          })
+          .maxTimeMS(QUERY_TIMEOUT_MS),
+        orderModel
+          .find({})
+          .select("_id customer seller status invoice createdAt")
+          .sort({ createdAt: -1 })
+          .limit(10)
+          .lean()
+          .maxTimeMS(QUERY_TIMEOUT_MS),
+      ]);
+
+    const result = {
+      totalOrders: Number(totalOrders) || 0,
+      missingCustomer: Number(missingCustomer) || 0,
+      missingSeller: Number(missingSeller) || 0,
+      recentOrders,
+    };
+
+    if (sellerEmail) {
+      const seller = await userModel
+        .findOne({ email: sellerEmail })
+        .select("_id userName email")
+        .lean()
+        .maxTimeMS(QUERY_TIMEOUT_MS);
+
+      if (!seller) {
+        result.seller = { email: sellerEmail, found: false };
+      } else {
+        const sellerOrders = await orderModel
+          .find({ seller: seller._id })
+          .select("_id customer status createdAt")
+          .lean()
+          .maxTimeMS(QUERY_TIMEOUT_MS);
+        const distinctCustomerIds = [
+          ...new Set(sellerOrders.map((o) => String(o.customer))),
+        ];
+
+        // Same shape of query GET /orders runs when the logged-in seller's
+        // own id is sent as both customer and userId ("my orders" on the app).
+        const myOrdersAsCustomerOrSeller = await orderModel
+          .countDocuments({
+            $and: [
+              { customer: { $exists: true, $ne: null } },
+              { seller: { $exists: true, $ne: null } },
+            ],
+            $or: [{ customer: seller._id }, { seller: seller._id }],
+          })
+          .maxTimeMS(QUERY_TIMEOUT_MS);
+
+        const sellerOnly = await orderModel
+          .countDocuments({
+            $and: [
+              { customer: { $exists: true, $ne: null } },
+              { seller: { $exists: true, $ne: null } },
+            ],
+            seller: seller._id,
+          })
+          .maxTimeMS(QUERY_TIMEOUT_MS);
+
+        result.seller = {
+          email: sellerEmail,
+          found: true,
+          id: String(seller._id),
+          userName: seller.userName,
+          totalAsSeller: sellerOrders.length,
+          distinctCustomerCount: distinctCustomerIds.length,
+          distinctCustomerIds,
+          myOrdersQueryCount: myOrdersAsCustomerOrSeller,
+          sellerOnlyQueryCount: sellerOnly,
+        };
+
+        if (customerEmail) {
+          const customer = await userModel
+            .findOne({ email: customerEmail })
+            .select("_id userName email")
+            .lean()
+            .maxTimeMS(QUERY_TIMEOUT_MS);
+
+          if (!customer) {
+            result.customer = { email: customerEmail, found: false };
+          } else {
+            result.customer = {
+              email: customerEmail,
+              found: true,
+              id: String(customer._id),
+              userName: customer.userName,
+              ordersFromThisCustomerToSeller: sellerOrders.filter(
+                (o) => String(o.customer) === String(customer._id)
+              ).length,
+            };
+          }
+        }
+      }
+    }
+
+    return res.status(200).json(result);
+  } catch (error) {
+    const response = getDatabaseErrorResponse(
+      error,
+      "Failed to fetch order diagnostics"
+    );
+    logAdminEndpointError(req, response.status, error);
+    return res.status(response.status).json({
+      success: false,
+      message: response.message,
+    });
+  }
+};
+
 exports.getTemplates = async (req, res) => {
   try {
     const templates = await emailTemplateModel
