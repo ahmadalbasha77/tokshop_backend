@@ -133,6 +133,15 @@ async function handleStripeEvent(event, stripe) {
         );
 
         if (!user) {
+          functions.saveLogs({
+            log_data: JSON.stringify({
+              type: "WEBHOOK_PAYOUT_WALLET_MISMATCH",
+              payoutId: payout.id,
+              amount: amount,
+              stripe_account: event.account,
+              message: "Payout webhook received but user wallet insufficient or user not found"
+            })
+          });
           return;
         }
       // }
@@ -164,6 +173,18 @@ async function handleStripeEvent(event, stripe) {
 
       }
 
+      functions.saveLogs({
+        user: user?._id,
+        log_data: JSON.stringify({
+          type: "WEBHOOK_PAYOUT_COMPLETED",
+          payoutId: payout.id,
+          amount: amount,
+          stripe_account: event.account,
+          balance_after_payout: user?.wallet,
+          bank_name: transaction?.bank_name,
+          message: "Payout completed and wallet deducted via webhook"
+        })
+      });
 
       if (user) {
         const placeholders = {
@@ -278,6 +299,14 @@ exports.processClearedTransactions = async function (stripe, connectedAccountId 
               const touser = await userModel.findById(tiptransaction.to);
               if (!touser) {
                 console.error(`User ${tiptransaction.to} not found`);
+                functions.saveLogs({
+                  log_data: JSON.stringify({
+                    type: "TIP_CREDIT_USER_NOT_FOUND",
+                    userId: tiptransaction.to?.toString(),
+                    amount: tiptransaction.amount,
+                    message: "Tip credit failed - seller user not found"
+                  })
+                });
                 return;
               }
               touser.walletPending -= tiptransaction.amount;
@@ -288,11 +317,31 @@ exports.processClearedTransactions = async function (stripe, connectedAccountId 
                 { $set: { paid_out: true } }
               );
 
+              functions.saveLogs({
+                user: tiptransaction.to,
+                log_data: JSON.stringify({
+                  type: "TIP_CREDIT_SUCCESS",
+                  amount: tiptransaction.amount,
+                  sellerId: tiptransaction.to?.toString(),
+                  walletAfter: touser.wallet,
+                  message: "Tip payment credited to seller wallet"
+                })
+              });
             }
             ))
         }
       } catch (err) {
         console.error(`❌ Failed payout for seller ${sellerId}:`, err.message);
+        functions.saveLogs({
+          user: sellerId,
+          log_data: JSON.stringify({
+            type: "SELLER_PAYOUT_PROCESSING_FAILED",
+            sellerId: sellerId,
+            errorCode: err.code || null,
+            errorMessage: err.message || err.toString(),
+            message: "Failed to process cleared transactions for seller"
+          })
+        });
       }
     }
 
@@ -341,11 +390,31 @@ async function transfer_shipping_fee(stripe) {
       { transfer_batch_id: batchId },
       { $set: { paid_out: true, transferId: transfer.id, status: "Completed" }, $unset: { transfer_batch_id: "" } }
     );
+
+    functions.saveLogs({
+      log_data: JSON.stringify({
+        type: "SHIPPING_FEE_TRANSFER_SUCCESS",
+        transferId: transfer.id,
+        amount: total,
+        destination: response["stripe_connect_account"],
+        transactionCount: txs.length,
+        message: "Shipping fee transferred to platform account"
+      })
+    });
   } catch (e) {
     await transactionModel.updateMany(
       { transfer_batch_id: batchId },
       { $unset: { transfer_batch_id: "" } }
     );
+    functions.saveLogs({
+      log_data: JSON.stringify({
+        type: "SHIPPING_FEE_TRANSFER_FAILED",
+        amount: total,
+        errorCode: e.code || null,
+        errorMessage: e.message || e.toString(),
+        message: "Shipping fee transfer to platform account failed"
+      })
+    });
     throw e;
   }
 }
@@ -388,6 +457,16 @@ async function transfer_service_fee(stripe) {
           { transfer_batch_id: transferBatchId },
           { $set: { paid_out: true, transferId: transfer.id, status: "Completed" }, $unset: { transfer_batch_id: "" } }
         );
+        functions.saveLogs({
+          log_data: JSON.stringify({
+            type: "SERVICE_FEE_TRANSFER_SUCCESS",
+            transferId: transfer.id,
+            amount: totalAmount,
+            destination: response["stripe_service_fee_account"],
+            transactionCount: servicefeetransactions.length,
+            message: "Service fee transferred to platform account"
+          })
+        });
       } else {
         if (!response["stripe_service_fee_account"]) {
           await transactionModel.updateMany(
@@ -402,6 +481,15 @@ async function transfer_service_fee(stripe) {
         { transfer_batch_id: transferBatchId },
         { $unset: { transfer_batch_id: "" } }
       );
+      functions.saveLogs({
+        log_data: JSON.stringify({
+          type: "SERVICE_FEE_TRANSFER_FAILED",
+          amount: totalAmount,
+          errorCode: err.code || null,
+          errorMessage: err.message || err.toString(),
+          message: "Service fee transfer to platform account failed"
+        })
+      });
     }
   }
 }

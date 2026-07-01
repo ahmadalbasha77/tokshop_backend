@@ -971,6 +971,25 @@ async function finalizeOrder({
     new_pending_balance: seller?.walletPending
   });
 
+  saveLogs({
+    user: order.seller,
+    log_data: JSON.stringify({
+      type: "ORDER_PAYMENT_SUCCESS",
+      orderId: order._id,
+      itemId: item._id,
+      chargeId: charge?.id,
+      amount: earnings,
+      total: subtotal,
+      shippingFee: amount,
+      serviceFee: serviceFee,
+      tax: tax,
+      invoice: order?.invoice,
+      buyerId: order.customer,
+      sellerId: order.seller,
+      message: "Order payment processed and transaction created"
+    })
+  });
+
   // creating service fee transaction waiting stripe to clear
   await transactionModel.create({
     reason: `System Service Fee from order${order?.invoice}`,
@@ -1752,6 +1771,13 @@ const stripeConnect = async (
       capabilities: {
         card_payments: { requested: true },
         transfers: { requested: true },
+      },
+      settings: {
+        payouts: {
+          schedule: {
+            interval: "manual",
+          },
+        },
       },
       business_profile: {
         url: "https://www.stealz.live",

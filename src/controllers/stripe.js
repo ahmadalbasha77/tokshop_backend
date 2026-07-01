@@ -705,6 +705,7 @@ exports.stripeTransfer = async (req, res) => {
     paid_out: false,
     type: "order",
     status: "Completed",
+    order_fulfilled: true,
     itemId: { $exists: true },
     chargeId: { $exists: true },
     availableOn: { $gte: todayStart, $lte: Date.now() }
@@ -1017,6 +1018,20 @@ exports.stripePayoutPayments = async (req, res) => {
         payoutId: payoutresponse.id
       })
 
+      functions.saveLogs({
+        user: req.params.userId,
+        log_data: JSON.stringify({
+          type: "MANUAL_PAYOUT_SUCCESS",
+          payoutId: payoutresponse.id,
+          amount: amount,
+          stripe_account: stripe_account,
+          bank_name: `${banks[0]["bank_name"]}****${banks[0]["last4"]}`,
+          payout_account: banks[0]["id"],
+          balance_after_payout: userres?.wallet,
+          message: "Manual payout to bank initiated successfully"
+        })
+      });
+
       const placeholders = {
         name: userres?.userName,
         amount: `$${amount}`,
@@ -1048,6 +1063,18 @@ exports.stripePayoutPayments = async (req, res) => {
         }
       }
     );
+    functions.saveLogs({
+      user: req.params.userId,
+      log_data: JSON.stringify({
+        type: "MANUAL_PAYOUT_FAILED",
+        amount: amount,
+        stripe_account: stripe_account,
+        errorCode: err.code || null,
+        errorType: err.type || null,
+        errorMessage: err.message || err.toString(),
+        message: "Manual payout to bank failed"
+      })
+    });
     if (err.type === "StripeInvalidRequestError") {
       // Check for specific error codes
       if (err.code === "payouts_not_allowed") {
@@ -1225,6 +1252,14 @@ exports.connect = async (req, res) => {
     capabilities: {
       card_payments: { requested: true },
       transfers: { requested: true },
+    },
+
+    settings: {
+      payouts: {
+        schedule: {
+          interval: "manual",
+        },
+      },
     },
 
     business_type: "individual",
