@@ -736,58 +736,74 @@ exports.getDeletedRoomById = async (req, res) => {
 };
 
 exports.deleteRoomById = async (req, res) => {
-  let { destroy } = req.query;
+  const { roomId } = req.params;
+
   try {
-    if (destroy == "true") {
-      let updatedRoom = await roomsModel.findByIdAndDelete(req.params.roomId);
-      await products.updateMany(
-        { tokshow: req.params.roomId },
-        { $set: { tokshow: null } }
-      );
-
-      res
-        .status(200)
-        .setHeader("Content-Type", "application/json")
-        .json(updatedRoom);
-    } else {
-      let updatedRoom = await roomsModel.findByIdAndUpdate(
-        req.params.roomId,
-        {
-          $set: {
-            ended: true,
-            endedTime: Date.now(),
-            $pullAll: { viewers: [] },
-          },
-        },
-        { ended: true },
-        { new: true }
-      );
-      
-        await products.updateMany(
-          { tokshow: req.params.roomId },
-          { $set: { tokshow: null } }
-        );
-      
-
-      if (updatedRoom.activeauction) {
-        await auctionModel.findByIdAndUpdate(updatedRoom.activeauction, {
-          $set: {
-            ended: true,
-          },
-        });
-      }
-
-      res
-        .status(200)
-        .setHeader("Content-Type", "application/json")
-        .json(updatedRoom);
+    if (!mongoose.isValidObjectId(roomId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid room ID",
+      });
     }
+
+    const room = await roomsModel.findById(roomId);
+
+    if (!room) {
+      return res.status(404).json({
+        success: false,
+        message: "Show not found",
+      });
+    }
+
+    if (room.activeauction) {
+      await auctionModel.findByIdAndUpdate(room.activeauction, {
+        $set: {
+          ended: true,
+        },
+      });
+    }
+
+    await products.updateMany(
+      { tokshow: roomId },
+      {
+        $set: {
+          tokshow: null,
+        },
+      }
+    );
+
+    await roomsModel.findByIdAndUpdate(roomId, {
+      $set: {
+        ended: true,
+        endedTime: Date.now(),
+        status: false,
+        viewers: [],
+        viewersCount: 0,
+      },
+    });
+
+    const deletedRoom = await roomsModel.findByIdAndDelete(roomId);
+
+    if (!deletedRoom) {
+      return res.status(404).json({
+        success: false,
+        message: "Show was not deleted",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Show ended and deleted successfully",
+      deletedId: deletedRoom._id,
+    });
   } catch (error) {
-    console.log("Error deleting room " + error);
-    res
-      .status(422)
-      .setHeader("Content-Type", "application/json")
-      .json(error.message);
+    console.error("deleteRoomById error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to delete show",
+      error: error.message,
+    });
   }
 };
 

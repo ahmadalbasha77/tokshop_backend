@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "start": "nodemon ./bin/www",
-    "test": "node test/stripeAccountStatus.test.js && node test/stripeAccountRecovery.test.js && node test/stripeConnectErrors.test.js && node test/stripeTransferReadiness.test.js && node test/stripeManualTransfer.test.js"
+    "test": "node test/stripeAccountStatus.test.js && node test/stripeAccountRecovery.test.js && node test/stripeConnectErrors.test.js && node test/stripeTransferReadiness.test.js && node test/stripeManualTransfer.test.js && node test/productDelete.test.js && node test/roomDelete.test.js"
   },
   "dependencies": {
     "@onesignal/node-onesignal": "^1.0.0-beta4",

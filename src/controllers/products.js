@@ -1079,15 +1079,38 @@ exports.deleteManyProductByIds = async (req, res) => {
     .json({ success: true });
 };
 exports.deleteProductById = async (req, res) => {
-  console.log(req.params.productId);
   try {
-    let deleted = await productModel.findByIdAndDelete(mongoose.mongo.ObjectId(req.params.productId));
-    res.status(200).setHeader("Content-Type", "application/json").json(deleted);
+    const { productId } = req.params;
+
+    if (!mongoose.isValidObjectId(productId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid product ID",
+      });
+    }
+
+    const deleted = await productModel.findByIdAndDelete(productId);
+
+    if (!deleted) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Product deleted successfully",
+      data: deleted,
+    });
   } catch (error) {
-    res
-      .status(422)
-      .setHeader("Content-Type", "application/json")
-      .json(error.message);
+    console.error("deleteProductById error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to delete product",
+      error: error.message,
+    });
   }
 };
 exports.updateManyProducts = async (req, res) => {
