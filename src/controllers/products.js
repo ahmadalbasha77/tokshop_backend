@@ -155,9 +155,9 @@ exports.getProducts = async (req, res) => {
       saletype, type, out_of_stock
     } = req.query;
 
-    const pages = Number(page);
-    const limits = Number(limit);
-    const skip = (pages - 1) * limits;
+    const currentPage = Math.max(1, Number(page) || 1);
+    const pageLimit = Math.max(1, Number(limit) || 10);
+    const skip = (currentPage - 1) * pageLimit;
 
     let sortPrice;
     if (price === "Low") sortPrice = 1;
@@ -330,7 +330,7 @@ exports.getProducts = async (req, res) => {
 
       { $sort: price ? { price: sortPrice } : { _id: -1 } },
       { $skip: skip },
-      { $limit: limits },
+      { $limit: pageLimit },
       // populate alternatives for aggregation
       {
         $lookup: {
@@ -415,12 +415,14 @@ exports.getProducts = async (req, res) => {
     ]);
 
     const totalDoc = countResult.length > 0 ? countResult[0].totalDoc : 0;
+    const totalPages = Math.max(1, Math.ceil(totalDoc / pageLimit));
 
-    res.json({
+    return res.json({
       products,
       totalDoc,
-      limits,
-      pages,
+      limits: pageLimit,
+      currentPage,
+      totalPages,
     });
   } catch (err) {
     console.error(err);
