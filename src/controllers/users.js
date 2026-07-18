@@ -873,14 +873,28 @@ exports.userFollowersFollowing = async function (req, res) {
 
 exports.userFollowers = async function (req, res) {
   try {
+    const hasPagination =
+      Object.prototype.hasOwnProperty.call(req.query, "page") ||
+      Object.prototype.hasOwnProperty.call(req.query, "limit");
     let { page = 1, limit = 10 } = req.query
     let id = req.params.userId;
     const user = await userModel.findById(id).select("followers");
     let total = user?.followers?.length || 0;
-    const users = await userModel
-      .find({ _id: { $in: user.followers } }).select("_id firstName lastName profilePhoto userName")
-      .skip((page - 1) * limit)
-      .limit(limit);
+    let usersQuery = userModel
+      .find({ _id: { $in: user.followers } })
+      .select("_id firstName lastName profilePhoto userName");
+
+    if (hasPagination) {
+      usersQuery = usersQuery
+        .skip((page - 1) * limit)
+        .limit(limit);
+    }
+
+    const users = await usersQuery;
+
+    if (!hasPagination) {
+      return res.json(users);
+    }
 
     res.json({
       users,
@@ -911,6 +925,9 @@ exports.userByUsername = async function (req, res) {
 
 exports.userFollowing = async function (req, res) {
   try {
+    const hasPagination =
+      Object.prototype.hasOwnProperty.call(req.query, "page") ||
+      Object.prototype.hasOwnProperty.call(req.query, "limit");
     let { page = 1, limit = 10 } = req.query;
     page = parseInt(page);
     limit = parseInt(limit);
@@ -922,7 +939,7 @@ exports.userFollowing = async function (req, res) {
 
     const total = user.following.length;
 
-    const users = await userModel.aggregate([
+    const pipeline = [
       { $match: { _id: { $in: user.following } } },
       {
         $addFields: {
@@ -930,8 +947,16 @@ exports.userFollowing = async function (req, res) {
         },
       },
       { $sort: { order: -1 } }, // latest followed first
-      { $skip: (page - 1) * limit },
-      { $limit: limit },
+    ];
+
+    if (hasPagination) {
+      pipeline.push(
+        { $skip: (page - 1) * limit },
+        { $limit: limit }
+      );
+    }
+
+    pipeline.push(
       {
         $project: {
           _id: 1,
@@ -941,7 +966,13 @@ exports.userFollowing = async function (req, res) {
           userName: 1,
         },
       },
-    ]);
+    );
+
+    const users = await userModel.aggregate(pipeline);
+
+    if (!hasPagination) {
+      return res.json(users);
+    }
 
     res.json({
       users,
