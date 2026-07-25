@@ -12,6 +12,66 @@ const {
     stripeRestrictionResponse
 } = require("../../shared/sellerProfile");
 
+async function syncRoomViewers(io, roomId) {
+    const roomKey = roomId?.toString();
+    if (!roomKey) return [];
+
+    const room = await roomsModel.findById(roomId).select("owner");
+    if (!room) return [];
+
+    const ownerId = room.owner?.toString();
+    const connectedSockets = await io.in(roomKey).fetchSockets();
+    const uniqueViewerIds = [...new Set(
+        connectedSockets
+            .filter((connectedSocket) => connectedSocket.data.liveRoomId === roomKey)
+            .map((connectedSocket) => connectedSocket.data.liveUserId)
+            .filter((userId) => userId && userId !== ownerId)
+    )];
+
+    await roomsModel.findByIdAndUpdate(roomId, {
+        $set: {
+            viewers: uniqueViewerIds,
+            viewersCount: uniqueViewerIds.length,
+        }
+    });
+
+    io.to(roomKey).emit("viewers-updated", {
+        roomId: roomKey,
+        viewers: uniqueViewerIds,
+        viewersCount: uniqueViewerIds.length,
+    });
+
+    return uniqueViewerIds;
+}
+
+async function leaveLiveRoom(io, socket) {
+    const roomId = socket.data.liveRoomId;
+    const userId = socket.data.liveUserId;
+    const userName = socket.data.liveUserName;
+    if (!roomId || !userId) return;
+
+    socket.leave(roomId);
+    socket.data.liveRoomId = null;
+    socket.data.liveUserId = null;
+    socket.data.liveUserName = null;
+
+    const remainingSockets = await io.in(roomId).fetchSockets();
+    const hasAnotherSocket = remainingSockets.some(
+        (connectedSocket) =>
+            connectedSocket.data.liveRoomId === roomId &&
+            connectedSocket.data.liveUserId === userId
+    );
+
+    if (!hasAnotherSocket) {
+        await roomsModel.findByIdAndUpdate(roomId, {
+            $pull: { viewers: userId }
+        });
+        io.to(roomId).emit("left-room", { roomId, userId, userName });
+    }
+
+    await syncRoomViewers(io, roomId);
+}
+
 module.exports = (io, socket) => {
 
     socket.on("start-room", async (data) => {
@@ -149,29 +209,41 @@ module.exports = (io, socket) => {
         console.log("join-room", data);
         let { roomId, userId, userName } = data;
         try {
-            socket.join(roomId);
-            console.log(`Socket ${socket.id} joined room ${roomId}`);
+            const roomKey = roomId?.toString();
+            const viewerId = userId?.toString();
+            const roomData = await roomsModel.findById(roomId).select("owner");
+            if (!roomData || !roomKey || !viewerId) {
+                return socket.emit("error", "Failed to join room");
+            }
 
-            socket.to(roomId).emit("user-connected", { roomId, userId, userName });
-            io.to(roomId).emit("current-user-joined", { roomId, userId, userName });
+            const connectedSockets = await io.in(roomKey).fetchSockets();
+            const alreadyConnected = connectedSockets.some(
+                (connectedSocket) => connectedSocket.data.liveUserId === viewerId
+            );
+            const isOwner = roomData.owner?.toString() === viewerId;
+
+            socket.data.liveRoomId = roomKey;
+            socket.data.liveUserId = viewerId;
+            socket.data.liveUserName = userName;
+            socket.join(roomKey);
+            console.log(`Socket ${socket.id} joined room ${roomKey}`);
+
+            if (!alreadyConnected) {
+                socket.to(roomKey).emit("user-connected", { roomId: roomKey, userId: viewerId, userName });
+                io.to(roomKey).emit("current-user-joined", { roomId: roomKey, userId: viewerId, userName });
+            }
+            const viewerUpdate = {
+                $set: { activeTime: Date.now() },
+            };
+            if (!isOwner) {
+                viewerUpdate.$addToSet = { viewers: viewerId };
+            }
             let room = await roomsModel.findByIdAndUpdate(
                 roomId,
-                {
-                    $set: { activeTime: Date.now() },
-                    $addToSet: { viewers: userId },
-                },
+                viewerUpdate,
                 { new: true }
             ).populate("pinned");
-            if (room) {
-                const viewersCount = room.viewers?.length || 0;
-                if (room.viewersCount !== viewersCount) {
-                    room = await roomsModel.findByIdAndUpdate(
-                        roomId,
-                        { $set: { viewersCount } },
-                        { new: true }
-                    ).populate("pinned");
-                }
-            }
+            await syncRoomViewers(io, roomId);
             if (room?.category) {
                 await category.findByIdAndUpdate(
                     room.category,
@@ -202,20 +274,21 @@ module.exports = (io, socket) => {
     socket.on("leave-room", async (data) => {
         let { roomId, userId, userName } = data;
         console.log("leave-room", data);
-        io.to(roomId).emit("left-room", { roomId, userId, userName });
-        socket.leave(roomId);
-        // remove viewer from room
-        const room = await roomsModel.findByIdAndUpdate(
-            roomId,
-            { $pull: { viewers: userId } },
-            { runValidators: true, new: true }
-        );
-        if (room) {
-            await roomsModel.findByIdAndUpdate(
-                roomId,
-                { $set: { viewersCount: room.viewers?.length || 0 } },
-                { runValidators: true }
-            );
+        socket.data.liveRoomId = roomId?.toString();
+        socket.data.liveUserId = userId?.toString();
+        socket.data.liveUserName = userName;
+        try {
+            await leaveLiveRoom(io, socket);
+        } catch (error) {
+            console.error("leave-room error:", error);
+        }
+    });
+
+    socket.on("disconnect", async () => {
+        try {
+            await leaveLiveRoom(io, socket);
+        } catch (error) {
+            console.error("disconnect room cleanup error:", error);
         }
     });
 };

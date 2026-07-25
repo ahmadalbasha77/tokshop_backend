@@ -32,6 +32,7 @@ const pendingServiceTransactionsController = require("../controllers/pendingServ
 const adminReadController = require("../controllers/adminRead");
 const adminOrderPaymentsController = require("../controllers/adminOrderPayments");
 const adminPayoutsController = require("../controllers/adminPayouts");
+const paymentReconciliationController = require("../controllers/paymentReconciliation");
 const publicShareRouter = require("./publicShare");
 
 require("../services/authenticate");
@@ -71,6 +72,11 @@ router.get(
   "/admin/financial-logs",
   requireAdminJson,
   adminReadController.getFinancialLogs
+);
+router.get(
+  "/admin/payment-reconciliation",
+  requireAdminJson,
+  paymentReconciliationController.getPaymentReconciliationReport
 );
 router.get("/users", requireAdminJson, adminReadController.getUsers);
 router.get(

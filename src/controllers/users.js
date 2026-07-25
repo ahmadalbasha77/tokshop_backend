@@ -2000,6 +2000,7 @@ exports.accountStatistics = async (req, res) => {
       // Orders waiting for label
       orderModel.countDocuments({
         need_label: true,
+        status: "processing",
         seller: id,
       }),
 

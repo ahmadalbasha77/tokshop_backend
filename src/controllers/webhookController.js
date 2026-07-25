@@ -10,6 +10,7 @@ const {
 const {
   releaseEligibleOrderPayments,
 } = require("../shared/orderPaymentRelease");
+const { processStripeEventOnce } = require("../shared/stripeEventProcessing");
 const CUTOFF_UTC_MS = Date.parse("2026-02-25T03:00:00.000Z");
 exports.handleStripeWebhook = async (req, res) => {
   const sig = req.headers["stripe-signature"];
@@ -28,11 +29,17 @@ exports.handleStripeWebhook = async (req, res) => {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
   try {
-    await handleStripeEvent(event, stripe);
+    const result = await processStripeEventOnce(event, "connected", () =>
+      handleStripeEvent(event, stripe)
+    );
+    if (result.inProgress) {
+      return res.status(500).json({ received: false, retry: true });
+    }
   } catch (err) {
     console.error("❌ Error processing Stripe webhook event:", err);
+    return res.status(500).json({ received: false, retry: true });
   }
-  res.status(200).json({ received: true });
+  return res.status(200).json({ received: true });
 };
 exports.handleStripePlatformWebhook = async (req, res) => {
   const sig = req.headers["stripe-signature"];
@@ -51,11 +58,17 @@ exports.handleStripePlatformWebhook = async (req, res) => {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
   try {
-    await handleStripePlatformEvent(event, stripe);
+    const result = await processStripeEventOnce(event, "platform", () =>
+      handleStripePlatformEvent(event, stripe)
+    );
+    if (result.inProgress) {
+      return res.status(500).json({ received: false, retry: true });
+    }
   } catch (err) {
     console.error("❌ Error processing Stripe platform webhook event:", err);
+    return res.status(500).json({ received: false, retry: true });
   }
-  res.status(200).json({ received: true });
+  return res.status(200).json({ received: true });
 };
 async function handleStripePlatformEvent(event, stripe) {
   // Use event type and data object to do other things

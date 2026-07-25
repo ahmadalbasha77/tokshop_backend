@@ -139,11 +139,14 @@ const acceptOffer = async (req, res) => {
     const {
       success,
       error,
+      retryable,
+      paymentError,
       newOrder,
       newItem,
       seller: se,
       buyer: by,
-      productres
+      productres,
+      idempotentReplay
     } = await functions.createOrder({
       buyer: offer.buyer._id,
       product: offer.product._id, 
@@ -158,15 +161,22 @@ const acceptOffer = async (req, res) => {
       totalWeightOz: offer.totalWeightOz,
       seller_shipping_fee_pay: offer.seller_shipping_fee_pay,
       bundleId: offer?.bundleId,
-      ordertype : "offer"
+      ordertype : "offer",
+      checkoutAttemptId:
+        req.body.checkoutAttemptId || req.get("Idempotency-Key") || null
     });
 
     if (!success) {
       console.log(error);
-      return res.status(400).json({ success, message: error?.error || "Failed to create order" });
+      return res.status(400).json({
+        success,
+        message: error?.error || error || "Failed to create order",
+        retryable,
+        paymentIntentStatus: paymentError?.paymentIntentStatus || null,
+      });
     }
 
-    if (success) {
+    if (success && !idempotentReplay) {
       offer.status = "accepted";
       offer.acceptedAt = new Date();
       await offer.save();
@@ -180,8 +190,9 @@ const acceptOffer = async (req, res) => {
       );
     }
 
-    // Optionally notify both users
-    functions.saveActivity(
+    if (!idempotentReplay) {
+      // Optionally notify both users
+      functions.saveActivity(
       newOrder._id,
       "New order from accepted offer",
       "OrderScreen",
@@ -232,7 +243,7 @@ const acceptOffer = async (req, res) => {
 
     console.log("productres ",productres)
 
-    if(productres?.quantity == 0){
+      if(productres?.quantity == 0){
       const rejectedOffers = await Offer.find({
         product: offer.product._id,
         _id: { $ne: offer._id },
@@ -263,6 +274,7 @@ const acceptOffer = async (req, res) => {
           );
         }
       });
+      }
     }
 
     return res.json({

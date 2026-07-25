@@ -1258,7 +1258,17 @@ exports.addOrder = async (req, res) => {
   console.log("req.body ", req.body)
   try {
     // Extract data from req.body
-    const { error, success, newOrder, newItem, seller: se, buyer: by } = await functions.createOrder({
+    const {
+      error,
+      success,
+      retryable,
+      paymentError,
+      newOrder,
+      newItem,
+      seller: se,
+      buyer: by,
+      idempotentReplay,
+    } = await functions.createOrder({
       shipping: {
         carrierAccount,
         amount: shippingFee,
@@ -1286,7 +1296,9 @@ exports.addOrder = async (req, res) => {
       seller_shipping_fee_pay,
       carrierAccount,
       carrier,
-      flash_sale
+      flash_sale,
+      checkoutAttemptId:
+        req.body.checkoutAttemptId || req.get("Idempotency-Key") || null
     });
     if (success == false) {
       console.log("error ", error, {
@@ -1295,11 +1307,14 @@ exports.addOrder = async (req, res) => {
       })
       return res.status(400).json({
         success,
-        error: error
+        error: error,
+        retryable,
+        paymentIntentStatus: paymentError?.paymentIntentStatus || null,
       });
     }
-    // Save activity for seller
-    functions.saveActivity(
+    if (!idempotentReplay) {
+      // Save activity for seller
+      functions.saveActivity(
       newOrder?._id,
       "New order",
       "OrderScreen",
@@ -1337,8 +1352,8 @@ exports.addOrder = async (req, res) => {
       console.log("sending emissiont to ", tokshow)
       socketEmitter.emitTo(tokshow?.toString(), "marketplace_order", { msg: message });
     }
-    if (se?.notification_settings?.notify_on_order == true) {
-      functions.sendNotification(
+      if (se?.notification_settings?.notify_on_order == true) {
+        functions.sendNotification(
         [se?.fcmToken],
         "New order",
         message,
@@ -1346,7 +1361,8 @@ exports.addOrder = async (req, res) => {
           id: newOrder?._id.toString(),
           screen: "OrderScreen",
         }
-      );
+        );
+      }
     }
 
     // If successful, return JSON
@@ -1539,6 +1555,7 @@ exports.cancelOrder = async (req, res) => {
         return res.status(404).json({ message: "Order not found" });
       }
       orderData.status = "cancelled";
+      orderData.need_label = false;
       orderData.cancelledDate = cancelledDate;
       await orderData.save();
       totalSellerToDeduct = orderData.earnings;
@@ -1605,6 +1622,7 @@ exports.cancelOrder = async (req, res) => {
         await parentOrder.save();
       } else if (parentOrder.items.length == 1) {
         parentOrder.status = "cancelled";
+        parentOrder.need_label = false;
         parentOrder.cancelledDate = cancelledDate;
         await parentOrder.save();
         transaction = await transactionModel.findOne({ orderId: parentOrder?._id });
@@ -1701,6 +1719,9 @@ exports.updateOrderById = async (req, res) => {
     // add timestamps based on status
     if (status === "shipped") {
       req.body.shippeddate = Date.now();
+    }
+    if (status === "shipped" || status === "delivered") {
+      req.body.need_label = false;
     }
 
     let orders = [];

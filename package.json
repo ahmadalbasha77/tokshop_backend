@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "start": "nodemon ./bin/www",
-    "test": "node test/stripeAccountStatus.test.js && node test/stripeAccountRecovery.test.js && node test/stripeConnectErrors.test.js && node test/stripeTransferReadiness.test.js && node test/stripeManualTransfer.test.js && node test/productDelete.test.js && node test/roomDelete.test.js && node test/productPagination.test.js && node test/userConnectionsCompatibility.test.js"
+    "test:payment-replica": "node test/paymentFinalizationReplicaSet.test.js",
+    "test": "node test/paymentSafety.test.js && node test/paymentFinalization.test.js && node test/paymentReconciliation.test.js && node test/stripeEventProcessing.test.js && node test/stripeAccountStatus.test.js && node test/stripeAccountRecovery.test.js && node test/stripeConnectErrors.test.js && node test/stripeTransferReadiness.test.js && node test/stripeManualTransfer.test.js && node test/productDelete.test.js && node test/roomDelete.test.js && node test/productPagination.test.js && node test/userConnectionsCompatibility.test.js"
   },
   "dependencies": {
     "@onesignal/node-onesignal": "^1.0.0-beta4",
@@ -70,5 +71,8 @@
   "bugs": {
     "url": "https://github.com/ahmadalbasha77/tokshop_backend/issues"
   },
-  "homepage": "https://github.com/ahmadalbasha77/tokshop_backend#readme"
+  "homepage": "https://github.com/ahmadalbasha77/tokshop_backend#readme",
+  "devDependencies": {
+    "mongodb-memory-server": "^11.2.0"
+  }
 }

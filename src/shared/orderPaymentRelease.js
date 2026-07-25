@@ -6,7 +6,7 @@ const userModel = require("../models/user");
 const { sendEmail } = require("./email");
 const { saveLogs } = require("./functions");
 
-const RELEASE_ELIGIBLE_ORDER_STATUSES = ["shipped", "delivered"];
+const RELEASE_ELIGIBLE_ORDER_STATUSES = ["delivered"];
 
 function normalizeOrderIds(orderIds) {
   if (!Array.isArray(orderIds)) return [];
@@ -41,7 +41,6 @@ async function getStripeClient() {
 async function releaseEligibleOrderPayments({
   orderIds,
   stripeClient = null,
-  requireDelivered = true,
 }) {
   const normalizedOrderIds = normalizeOrderIds(orderIds);
   if (!normalizedOrderIds.length) return [];
@@ -49,9 +48,7 @@ async function releaseEligibleOrderPayments({
   const orderFilter = {
     _id: { $in: normalizedOrderIds },
   };
-  if (requireDelivered) {
-    orderFilter.status = { $in: RELEASE_ELIGIBLE_ORDER_STATUSES };
-  }
+  orderFilter.status = { $in: RELEASE_ELIGIBLE_ORDER_STATUSES };
 
   const eligibleOrderIds = await orderModel.distinct("_id", orderFilter);
   if (!eligibleOrderIds.length) return [];

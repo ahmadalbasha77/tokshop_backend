@@ -421,7 +421,7 @@ exports.webookShippo = async (req, res) => {
     console.log("status", status)
     let order = await orderModel.findOneAndUpdate(
       { tracking_number },
-      { status: "shipped", shipped_at: date },
+      { status: "shipped", shipped_at: date, need_label: false },
       { new: true }
     ).populate("seller", "fcmToken").populate("buyer", "fcmToken");
 
@@ -460,7 +460,7 @@ exports.webookShippo = async (req, res) => {
     // let tracking_number = '9200190396055700394600';
     let order = await orderModel.findOneAndUpdate(
       { tracking_number },
-      { status: "delivered", delivered_at: date },
+      { status: "delivered", delivered_at: date, need_label: false },
       { new: true }
     );
     if (order) {

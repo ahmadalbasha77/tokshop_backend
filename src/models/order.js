@@ -78,6 +78,15 @@ const order = new Schema(
       type: String,
       required: false,
     },
+    paymentIntentId: {
+      type: String,
+      required: false,
+    },
+    paymentIntentIds: [{ type: String }],
+    paymentAttemptId: {
+      type: String,
+      required: false,
+    },
     status: {
       type: String,
       default: "processing",

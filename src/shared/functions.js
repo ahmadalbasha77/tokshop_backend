@@ -19,6 +19,7 @@ const category = require("../models/category");
 const socketEmitter = require("./socketEmitter");
 const logsModel = require("../models/activity_logs");
 const referralLogModel = require("../models/referral_log");
+const paymentAttemptModel = require("../models/payment_attempt");
 
 const { stopEgress } = require("./livekit");
 const { sendPushNotification } = require("./send_notification");
@@ -33,6 +34,17 @@ const {
   isStripeIdempotencyMismatch,
   selectRecoverableStripeAccount,
 } = require("./stripeAccountRecovery");
+const {
+  assertProductSeller,
+  assertSucceededPaymentIntent,
+  buildStripeIdempotencyKey,
+  normalizeOrderShipping,
+  validateEarnings,
+} = require("./paymentSafety");
+const {
+  finalizeSuccessfulPaymentAttempt,
+  isTransactionalPaymentFinalizationEnabled,
+} = require("./paymentFinalization");
 function getOrderPopulates() {
   return [
     {
@@ -304,7 +316,8 @@ async function createOrder({
   shipping = null,
   referredBy = null,
   referralDiscount = 0,
-  allow_referal_discount = false
+  allow_referal_discount = false,
+  checkoutAttemptId = null
 }) {
   const orderId = new mongoose.Types.ObjectId();
   const itemId = new mongoose.Types.ObjectId();
@@ -384,6 +397,13 @@ async function createOrder({
 
   const earnings = Number(totalMinusDeductions.toFixed(2));
   const totalStripeCharges = extra_charges + stripe_fee;
+  validateEarnings({
+    subtotal,
+    serviceFee,
+    stripeFee: stripe_fee,
+    extraCharges: extra_charges,
+    earnings,
+  });
 
   // ================= ADDRESS =================
   const address = await addressModel
@@ -417,6 +437,117 @@ async function createOrder({
   if (!productres || productres.quantity <= 0) {
     return { success: false, error: "product out of stock" };
   }
+  assertProductSeller(productres, seller);
+
+  // Normalize shipping before Stripe or any financial/database write. This
+  // keeps products without shipping valid while avoiding a late null
+  // destructure after walletPending has already changed.
+  const normalizedShipping = normalizeOrderShipping({
+    shipping,
+    shippingFee,
+    totalWeightOz,
+    bundleId,
+    sellerShippingFeePay: seller_shipping_fee_pay,
+    carrierAccount,
+    carrier,
+    rateId: rate_id,
+  });
+  const stripeIdempotencyKey = buildStripeIdempotencyKey({
+    checkoutAttemptId,
+    buyerId: buyer,
+    orderId,
+  });
+  try {
+    await paymentAttemptModel.create({
+      _id: stripeIdempotencyKey,
+      orderId,
+      itemId,
+      buyerId: buyer,
+      sellerId: seller,
+      productId: product,
+      flow: ordertype || "marketplace",
+      recordingStatus: "created",
+    });
+  } catch (attemptError) {
+    if (attemptError?.code !== 11000) throw attemptError;
+    const existingAttempt = await paymentAttemptModel
+      .findById(stripeIdempotencyKey)
+      .lean();
+    if (
+      isTransactionalPaymentFinalizationEnabled() &&
+      existingAttempt?.stripeStatus === "succeeded" &&
+      ["stripe_succeeded", "needs_reconciliation"].includes(
+        existingAttempt.recordingStatus
+      )
+    ) {
+      try {
+        const finalizedOrder = await finalizeSuccessfulPaymentAttempt(
+          stripeIdempotencyKey
+        );
+        finalizedOrder.productres = productres;
+        await runTransactionalPostCommitEffects({
+          finalizedOrder,
+          productres,
+          charge: {
+            id: existingAttempt.chargeId,
+            balance_transaction: { id: existingAttempt.balanceTransactionId },
+          },
+          balanceTx: existingAttempt.availableOn
+            ? { available_on: Math.floor(existingAttempt.availableOn / 1000) }
+            : null,
+          subtotal: existingAttempt.subtotal,
+          serviceFee: existingAttempt.serviceFee,
+          tax: existingAttempt.tax,
+          shipping: existingAttempt.shippingData || normalizedShipping,
+          paymentIntentId: existingAttempt.paymentIntentId,
+          paymentAttemptId: existingAttempt._id,
+        });
+        return finalizedOrder;
+      } catch (finalizationError) {
+        return {
+          success: false,
+          retryable: false,
+          error: "Payment was received; order recording is pending",
+          paymentError: {
+            code: "PAYMENT_RECORDING_PENDING",
+            paymentIntentId: existingAttempt.paymentIntentId,
+            paymentIntentStatus: "succeeded",
+            retryPayment: false,
+            recordingError: finalizationError.code || "LOCAL_FINALIZATION_FAILED",
+          },
+        };
+      }
+    }
+    if (existingAttempt?.recordingStatus === "recorded") {
+      const [existingOrder, existingItem] = await Promise.all([
+        orderModel.findById(existingAttempt.orderId),
+        itemModel.findById(existingAttempt.itemId),
+      ]);
+      if (existingOrder && existingItem) {
+        return {
+          success: true,
+          orderId: existingOrder._id,
+          message: "Order completed",
+          newOrder: existingOrder,
+          newItem: existingItem,
+          seller: existingOrder.seller,
+          buyer: existingOrder.customer,
+          productres,
+          idempotentReplay: true,
+        };
+      }
+    }
+    return {
+      success: false,
+      retryable: false,
+      error: "Payment attempt is already being processed",
+      paymentError: {
+        code: "PAYMENT_ATTEMPT_IN_PROGRESS",
+        paymentIntentId: existingAttempt?.paymentIntentId || null,
+        paymentIntentStatus: existingAttempt?.stripeStatus || null,
+      },
+    };
+  }
 
   // ================= CREATE ORDER (ONCE) =================
   const totalShippingCost =
@@ -426,23 +557,8 @@ async function createOrder({
 
   // ================= CREATE ITEM (ONCE) =================
   let itemtotal = flash_sale ? productres.flash_sale_price : productres.price;
-
-
-  // ================= ATTEMPT PAYMENT =================
-  const { charge, balanceTx, success, error, referralDiscountApplied } =
-    await chargeStripePaymentMethod(
-      subtotal,
-      paymentmethod,
-      orderId,
-      seller,
-      serviceFee,
-      shippingFee,
-      tax,
-      referralDiscount,
-      buyer
-    );
-  referralDiscount = referralDiscountApplied || 0;
-
+  if (ordertype == "offer") itemtotal = subtotal;
+  if (ordertype == "auction") itemtotal = bidTotal;
 
   const payload = {
     _id: orderId,
@@ -471,16 +587,12 @@ async function createOrder({
     bundleId: bundleId?.toString(),
     seller_shipping_fee_pay,
     total_shipping_cost: totalShippingCost, carrierAccount,
-    discount: referralDiscount
+    discount: referralDiscount,
+    paymentIntentId: null,
+    paymentIntentIds: [],
+    paymentAttemptId: stripeIdempotencyKey
   };
 
-
-  if (ordertype == "offer") {
-    itemtotal = subtotal;
-  }
-  if (ordertype == "auction") {
-    itemtotal = bidTotal;
-  }
   var orderItem = {
     _id: itemId,
     productId: product,
@@ -490,7 +602,9 @@ async function createOrder({
     tokshow,
     order_reference: `#${productres.order_reference_counter}`,
     quantity,
-    chargeId: charge?.id,
+    chargeId: null,
+    paymentIntentId: null,
+    paymentAttemptId: stripeIdempotencyKey,
     price: itemtotal,
     ordertype,
     weight: productres?.shipping_profile?.weight,
@@ -506,15 +620,78 @@ async function createOrder({
     videoReceipt: videoReceipt || ""
   };
 
+  const transactionalFinalization = isTransactionalPaymentFinalizationEnabled();
+  let snapshotUpdate = null;
+  try {
+    snapshotUpdate = await paymentAttemptModel.updateOne(
+      { _id: stripeIdempotencyKey, recordingStatus: "created" },
+      {
+        $set: {
+          orderData: payload,
+          itemData: orderItem,
+          shippingData: normalizedShipping,
+          earnings,
+          subtotal: Number(subtotal),
+          serviceFee: Number(serviceFee),
+          stripeFee: Number(stripe_fee),
+          extraCharges: Number(extra_charges),
+          tax: Number(tax || 0),
+          transactionalFinalization,
+          activationAt: transactionalFinalization ? new Date() : null,
+        },
+      }
+    );
+  } catch (snapshotWriteError) {
+    if (transactionalFinalization) snapshotUpdate = { matchedCount: 0 };
+  }
+  if (transactionalFinalization && snapshotUpdate?.matchedCount !== 1) {
+    const snapshotError = new Error("Unable to persist payment financial snapshot");
+    snapshotError.code = "PAYMENT_ATTEMPT_SNAPSHOT_WRITE_FAILED";
+    throw snapshotError;
+  }
+
+  // Stripe is intentionally completed before any MongoDB transaction starts.
+  const { charge, balanceTx, paymentIntent, success, error, referralDiscountApplied } =
+    await chargeStripePaymentMethod(
+      subtotal,
+      paymentmethod,
+      orderId,
+      seller,
+      serviceFee,
+      shippingFee,
+      tax,
+      referralDiscount,
+      buyer,
+      stripeIdempotencyKey
+    );
+  referralDiscount = referralDiscountApplied || 0;
+  const paymentIntentId = paymentIntent?.id || paymentIntent || null;
+  payload.discount = referralDiscount;
+  payload.paymentIntentId = paymentIntentId;
+  payload.paymentIntentIds = [paymentIntentId].filter(Boolean);
+  orderItem.chargeId = charge?.id;
+  orderItem.paymentIntentId = paymentIntentId;
+
   // ================= PAYMENT FAILED =================
   if (!success) {
     console.log(ordertype);
+    const paymentIntentStatus = error?.paymentIntentStatus || null;
+    const paymentCanBeRetried = error?.retryPayment !== false;
+    const paymentMayStillComplete = [
+      "processing",
+      "requires_action",
+      "requires_capture",
+    ].includes(paymentIntentStatus);
     if (ordertype == "auction" || ordertype == "offer" || flash_sale == true) {
       const failedOrder = await orderModel.create({
         ...payload,
         items: [itemId],
-        status: "payment_failed",
-        payment_status: "failed",
+        status: paymentMayStillComplete
+          ? `payment_${paymentIntentStatus}`
+          : "payment_failed",
+        payment_status: paymentMayStillComplete
+          ? "incomplete"
+          : "failed",
         retry_count: 1,
         last_payment_error: error?.error,
         weight: productres?.shipping_profile?.weight,
@@ -523,7 +700,9 @@ async function createOrder({
       await itemModel.create({
         ...orderItem,
         orderId: failedOrder._id,
-        status: "payment_failed"
+        status: paymentMayStillComplete
+          ? `payment_${paymentIntentStatus}`
+          : "payment_failed"
       });
 
       // ---------- LOGS ----------
@@ -590,7 +769,7 @@ async function createOrder({
 
     return {
       success: false,
-      retryable: true,
+      retryable: paymentCanBeRetried,
       orderId,
       message: error?.error || "Payment failed",
       error: error?.error || "Payment failed",
@@ -598,12 +777,92 @@ async function createOrder({
     };
   }
 
-  let newOrder = await orderModel.findOne({
-    status: "processing",
-    bundleId: bundleId,
-    customer: buyer,
-    tokshow
-  });
+  let finalAttemptUpdate = null;
+  try {
+    finalAttemptUpdate = await paymentAttemptModel.updateOne(
+      { _id: stripeIdempotencyKey, stripeStatus: "succeeded" },
+      {
+        $set: {
+          orderData: payload,
+          itemData: orderItem,
+          shippingData: normalizedShipping,
+          paymentIntentId,
+          stripeStatus: "succeeded",
+          recordingStatus: "stripe_succeeded",
+          chargeId: charge?.id || null,
+          balanceTransactionId: charge?.balance_transaction?.id || null,
+          availableOn: balanceTx?.available_on
+            ? balanceTx.available_on * 1000
+            : Date.now(),
+          lastRecordingError: null,
+        },
+      }
+    );
+  } catch (attemptUpdateError) {
+    if (transactionalFinalization) finalAttemptUpdate = { matchedCount: 0 };
+  }
+  if (transactionalFinalization && finalAttemptUpdate?.matchedCount !== 1) {
+    return {
+      success: false,
+      retryable: false,
+      orderId,
+      message: "Payment was received; order recording is pending",
+      error: "Payment was received; order recording is pending",
+      paymentError: {
+        code: "PAYMENT_RECORDING_PENDING",
+        paymentIntentId,
+        paymentIntentStatus: "succeeded",
+        retryPayment: false,
+      },
+    };
+  }
+
+  if (transactionalFinalization) {
+    try {
+      const finalizedOrder = await finalizeSuccessfulPaymentAttempt(
+        stripeIdempotencyKey
+      );
+      finalizedOrder.productres = productres;
+      await runTransactionalPostCommitEffects({
+        finalizedOrder,
+        productres,
+        charge,
+        balanceTx,
+        subtotal,
+        serviceFee,
+        tax,
+        shipping: normalizedShipping,
+        paymentIntentId,
+        paymentAttemptId: stripeIdempotencyKey,
+      });
+      return finalizedOrder;
+    } catch (finalizationError) {
+      return {
+        success: false,
+        retryable: false,
+        orderId,
+        message: "Payment was received; order recording is pending",
+        error: "Payment was received; order recording is pending",
+        paymentError: {
+          code: "PAYMENT_RECORDING_PENDING",
+          paymentIntentId,
+          paymentIntentStatus: "succeeded",
+          retryPayment: false,
+          recordingError: finalizationError.code || "LOCAL_FINALIZATION_FAILED",
+        },
+      };
+    }
+  }
+
+  let newOrder = bundleId
+    ? await orderModel.findOne({
+        status: "processing",
+        bundleId,
+        customer: buyer,
+        tokshow,
+        seller,
+      })
+    : null;
   // console.log("orderItem ",orderItem)
   const newItem = await itemModel.create({
     ...orderItem,
@@ -629,6 +888,12 @@ async function createOrder({
     newOrder.ordertype = orderDifftype;
     newOrder.carrierAccount = carrierAccount;
     newOrder.discount = newOrder?.discount + (referralDiscount || 0);
+    if (paymentIntent?.id || paymentIntent) {
+      newOrder.paymentIntentIds = Array.from(new Set([
+        ...(newOrder.paymentIntentIds || []),
+        paymentIntent?.id || paymentIntent,
+      ]));
+    }
     newOrder.seller_shipping_fee_pay = seller_shipping_fee_pay + newOrder?.seller_shipping_fee_pay;
     newOrder.total_shipping_cost = totalShippingCost + newOrder?.total_shipping_cost;
     await newOrder.save();
@@ -642,7 +907,7 @@ async function createOrder({
   }
 
   // ================= PAYMENT SUCCESS → FINALIZE =================
-  return await finalizeOrder({
+  const finalizedOrder = await finalizeOrder({
     order: newOrder,
     item: newItem,
     productres,
@@ -654,9 +919,21 @@ async function createOrder({
     serviceFee,
     tax,
     isNewBundle,
-    shipping,
-    stripe_fee
+    shipping: normalizedShipping,
+    stripe_fee,
+    paymentIntentId: paymentIntent?.id || paymentIntent || null,
+    paymentAttemptId: stripeIdempotencyKey
   });
+  await paymentAttemptModel.updateOne(
+    { _id: stripeIdempotencyKey },
+    { $set: { recordingStatus: "recorded", recordedAt: new Date() } }
+  ).catch((attemptError) => {
+    console.error("Payment succeeded but attempt completion was not recorded", {
+      code: attemptError.code || null,
+      orderId: finalizedOrder?.orderId?.toString?.() || orderId.toString(),
+    });
+  });
+  return finalizedOrder;
 }
 async function retryOrderPayment(orderId) {
   const order = await orderModel.findById(orderId);
@@ -744,7 +1021,142 @@ async function retryOrderPayment(orderId) {
 
 
   // 5️⃣ Retry Stripe charge
-  const { charge, balanceTx, success, error } =
+  const stripeIdempotencyKey = buildStripeIdempotencyKey({
+    checkoutAttemptId: `retry:${order._id}:${order.retry_count || 0}`,
+    buyerId: order.customer,
+    orderId: order._id,
+  });
+  const retryAttemptItem = await itemModel.findOne({ orderId: order._id });
+  if (!retryAttemptItem) {
+    return { success: false, retryable: false, error: "Order item not found" };
+  }
+  try {
+    await paymentAttemptModel.create({
+      _id: stripeIdempotencyKey,
+      orderId: order._id,
+      itemId: retryAttemptItem._id,
+      buyerId: order.customer,
+      sellerId: order.seller,
+      productId: retryAttemptItem.productId,
+      flow: "retry",
+      recordingStatus: "created",
+    });
+  } catch (attemptError) {
+    if (attemptError?.code !== 11000) throw attemptError;
+    const existingAttempt = await paymentAttemptModel
+      .findById(stripeIdempotencyKey)
+      .lean();
+    if (
+      isTransactionalPaymentFinalizationEnabled() &&
+      existingAttempt?.stripeStatus === "succeeded" &&
+      ["stripe_succeeded", "needs_reconciliation"].includes(
+        existingAttempt.recordingStatus
+      )
+    ) {
+      try {
+        const finalizedOrder = await finalizeSuccessfulPaymentAttempt(
+          stripeIdempotencyKey
+        );
+        const productres = await productModel.findById(retryAttemptItem.productId);
+        finalizedOrder.productres = productres;
+        await runTransactionalPostCommitEffects({
+          finalizedOrder,
+          productres,
+          charge: {
+            id: existingAttempt.chargeId,
+            balance_transaction: { id: existingAttempt.balanceTransactionId },
+          },
+          balanceTx: existingAttempt.availableOn
+            ? { available_on: Math.floor(existingAttempt.availableOn / 1000) }
+            : null,
+          subtotal: existingAttempt.subtotal,
+          serviceFee: existingAttempt.serviceFee,
+          tax: existingAttempt.tax,
+          shipping: existingAttempt.shippingData || shipping,
+          paymentIntentId: existingAttempt.paymentIntentId,
+          paymentAttemptId: existingAttempt._id,
+        });
+        return finalizedOrder;
+      } catch (finalizationError) {
+        return {
+          success: false,
+          retryable: false,
+          error: "Payment was received; order recording is pending",
+        };
+      }
+    }
+    if (existingAttempt?.recordingStatus === "recorded") {
+      const [existingOrder, existingItem] = await Promise.all([
+        orderModel.findById(existingAttempt.orderId),
+        itemModel.findById(existingAttempt.itemId),
+      ]);
+      if (existingOrder && existingItem) {
+        return {
+          success: true,
+          orderId: existingOrder._id,
+          message: "Order completed",
+          newOrder: existingOrder,
+          newItem: existingItem,
+          seller: existingOrder.seller,
+          buyer: existingOrder.customer,
+          idempotentReplay: true,
+        };
+      }
+    }
+    return {
+      success: false,
+      retryable: false,
+      error: "Payment retry is already being processed",
+    };
+  }
+  const transactionalFinalization = isTransactionalPaymentFinalizationEnabled();
+  const retryOrderData = {
+    ...order.toObject(),
+    bundleId: shipping.bundleId,
+    weight: shipping.totalWeightOz,
+    shipping_fee: shipping.amount,
+    seller_shipping_fee_pay: shipping.seller_shipping_fee_pay,
+    total_shipping_cost: shipping.totalAmount,
+    paymentIntentId: null,
+    paymentAttemptId: stripeIdempotencyKey,
+  };
+  const retryItemData = {
+    ...retryAttemptItem.toObject(),
+    chargeId: null,
+    paymentIntentId: null,
+    paymentAttemptId: stripeIdempotencyKey,
+  };
+  let retrySnapshot = null;
+  try {
+    retrySnapshot = await paymentAttemptModel.updateOne(
+      { _id: stripeIdempotencyKey, recordingStatus: "created" },
+      {
+        $set: {
+          orderData: retryOrderData,
+          itemData: retryItemData,
+          shippingData: shipping,
+          earnings: Number(order.earnings),
+          subtotal: Number(order.subtotal),
+          serviceFee: Number(order.service_fee),
+          stripeFee: Number(order.stripe_fees || 0),
+          extraCharges: 0,
+          tax: Number(order.tax || 0),
+          transactionalFinalization,
+          activationAt: transactionalFinalization ? new Date() : null,
+        },
+      }
+    );
+  } catch (snapshotError) {
+    if (transactionalFinalization) retrySnapshot = { matchedCount: 0 };
+  }
+  if (transactionalFinalization && retrySnapshot?.matchedCount !== 1) {
+    return {
+      success: false,
+      retryable: false,
+      error: "Unable to prepare payment retry safely",
+    };
+  }
+  const { charge, balanceTx, paymentIntent, success, error } =
     await chargeStripePaymentMethod(
       order.subtotal,
       paymentmethod,
@@ -754,7 +1166,8 @@ async function retryOrderPayment(orderId) {
       shipping.amount,
       order.tax,
       order.discount ?? 0,
-      order?.customer
+      order?.customer,
+      stripeIdempotencyKey
     );
 
   // 6️⃣ Retry failed again
@@ -769,9 +1182,75 @@ async function retryOrderPayment(orderId) {
     return { success: false, retryable: true, error: error?.error };
   }
 
+  const paymentIntentId = paymentIntent?.id || paymentIntent || null;
+  retryOrderData.paymentIntentId = paymentIntentId;
+  retryOrderData.paymentIntentIds = Array.from(new Set([
+    ...(retryOrderData.paymentIntentIds || []),
+    paymentIntentId,
+  ].filter(Boolean)));
+  retryItemData.chargeId = charge?.id || null;
+  retryItemData.paymentIntentId = paymentIntentId;
+  let retryAttemptUpdate = null;
+  try {
+    retryAttemptUpdate = await paymentAttemptModel.updateOne(
+      { _id: stripeIdempotencyKey, stripeStatus: "succeeded" },
+      {
+        $set: {
+          orderData: retryOrderData,
+          itemData: retryItemData,
+          paymentIntentId,
+          stripeStatus: "succeeded",
+          recordingStatus: "stripe_succeeded",
+          chargeId: charge?.id || null,
+          balanceTransactionId: charge?.balance_transaction?.id || null,
+          availableOn: balanceTx?.available_on
+            ? balanceTx.available_on * 1000
+            : Date.now(),
+        },
+      }
+    );
+  } catch (attemptUpdateError) {
+    if (transactionalFinalization) retryAttemptUpdate = { matchedCount: 0 };
+  }
+  if (transactionalFinalization) {
+    if (retryAttemptUpdate?.matchedCount !== 1) {
+      return {
+        success: false,
+        retryable: false,
+        error: "Payment was received; order recording is pending",
+      };
+    }
+    try {
+      const finalizedOrder = await finalizeSuccessfulPaymentAttempt(
+        stripeIdempotencyKey
+      );
+      const productres = await productModel.findById(retryAttemptItem.productId);
+      finalizedOrder.productres = productres;
+      await runTransactionalPostCommitEffects({
+        finalizedOrder,
+        productres,
+        charge,
+        balanceTx,
+        subtotal: order.subtotal,
+        serviceFee: order.service_fee,
+        tax: order.tax,
+        shipping,
+        paymentIntentId,
+        paymentAttemptId: stripeIdempotencyKey,
+      });
+      return finalizedOrder;
+    } catch (finalizationError) {
+      return {
+        success: false,
+        retryable: false,
+        error: "Payment was received; order recording is pending",
+      };
+    }
+  }
+
   // 7️⃣ Finalize order
   const item = await itemModel.findOne({ orderId: order._id }).populate("productId");
-  return await finalizeOrder({
+  const finalizedOrder = await finalizeOrder({
     order,
     item,
     productres: item.productId,
@@ -785,8 +1264,15 @@ async function retryOrderPayment(orderId) {
     tax: order.tax,
     total_shipping_cost: order.total_shipping_cost,
     shipping,
-    retry: true
+    retry: true,
+    paymentIntentId: paymentIntent?.id || paymentIntent || null,
+    paymentAttemptId: stripeIdempotencyKey
   });
+  await paymentAttemptModel.updateOne(
+    { _id: stripeIdempotencyKey },
+    { $set: { recordingStatus: "recorded", recordedAt: new Date() } }
+  ).catch(() => {});
+  return finalizedOrder;
 }
 
 async function recalcBundleForRetry(order) {
@@ -843,6 +1329,124 @@ async function recalcBundleForRetry(order) {
   };
 }
 
+async function runTransactionalPostCommitEffects({
+  finalizedOrder,
+  productres,
+  charge,
+  balanceTx,
+  subtotal,
+  serviceFee,
+  tax,
+  shipping,
+  paymentIntentId,
+  paymentAttemptId,
+}) {
+  if (finalizedOrder.idempotentReplay) return;
+  const order = finalizedOrder.newOrder;
+  const item = finalizedOrder.newItem;
+
+  try {
+    if (productres?.flash_sale && productres?.quantity === 0) {
+      await roomsModel.findByIdAndUpdate(productres?.tokshow, {
+        $set: { pinned: null }
+      });
+    }
+    socketEmitter.emitTo(
+      productres?.tokshow?.toString(),
+      "flash-sale-product-update",
+      productres
+    );
+
+    if (Number(shipping.amount) > 0) {
+      await transactionModel.create({
+        reason: `Buyer Shipping cost from order #${order._id}`,
+        amount: Number(shipping.amount),
+        status: "Pending",
+        type: "shipping_deduction",
+        deducting: true,
+        orderId: order._id,
+        paymentIntentId,
+        paymentAttemptId,
+        date: Date.now(),
+        availableOn: balanceTx?.available_on
+          ? balanceTx.available_on * 1000
+          : Date.now(),
+      });
+    }
+
+    if (Number(order?.discount) > 0) {
+      await referralLogModel.updateOne(
+        { referredUserId: order.customer, rewardedAt: null },
+        { $set: { rewardedAt: new Date() } }
+      );
+      await transactionModel.create({
+        from: order.seller,
+        to: order.customer,
+        amount: Number(order.discount),
+        status: "Completed",
+        type: "referral_credit",
+        reason: `Referral discount from order #${order._id}`,
+        paymentIntentId,
+        paymentAttemptId,
+        date: Date.now(),
+        deducting: true,
+      });
+    }
+
+    await transactionModel.create({
+      reason: `System Service Fee from order${order?.invoice}`,
+      amount: parseFloat(serviceFee),
+      paymentIntentId,
+      paymentAttemptId,
+      status: "Pending",
+      type: "service_fee",
+      deducting: true,
+      orderId: order._id,
+      date: Date.now(),
+      availableOn: balanceTx?.available_on
+        ? balanceTx.available_on * 1000
+        : Date.now(),
+    });
+
+    if (productres?.tokshow) {
+      const roomUpdate = {
+        $addToSet: { soldProducts: productres._id },
+        $inc: { salesTotal: subtotal, salesCount: item.quantity }
+      };
+      if (finalizedOrder.isNewBundle) roomUpdate.$inc.shipmentsCount = 1;
+      await roomsModel.findByIdAndUpdate(productres.tokshow, roomUpdate, {
+        runValidators: true,
+        new: true,
+      });
+    }
+
+    saveLogs({
+      user: order.seller,
+      log_data: JSON.stringify({
+        type: "ORDER_PAYMENT_SUCCESS",
+        orderId: order._id,
+        itemId: item._id,
+        chargeId: charge?.id,
+        paymentIntentId,
+        amount: order.earnings,
+        total: subtotal,
+        shippingFee: shipping.amount,
+        serviceFee,
+        tax,
+        invoice: order.invoice,
+        buyerId: order.customer,
+        sellerId: order.seller,
+        message: "Order payment transaction committed"
+      })
+    });
+  } catch (error) {
+    console.error("Post-commit order side effect failed", {
+      code: error.code || null,
+      orderId: order?._id?.toString?.(),
+    });
+  }
+}
+
 
 async function finalizeOrder({
   order,
@@ -858,21 +1462,104 @@ async function finalizeOrder({
   shipping,
   stripe_fee,
   retry = false,
+  paymentIntentId = null,
+  paymentAttemptId = null,
 }) {
-  console.log("finalizing order ", shipping, earnings, order)
   if (order.payment_status === "paid" && retry == true) return order;
 
+  const validatedEarnings = validateEarnings({
+    subtotal,
+    serviceFee,
+    stripeFee: stripe_fee ?? order?.stripe_fees ?? 0,
+    extraCharges: order?.extra_charges ?? 0,
+    earnings,
+  });
+  const normalizedShipping = normalizeOrderShipping({
+    shipping,
+    shippingFee: order?.shipping_fee,
+    totalWeightOz: order?.weight,
+    bundleId: order?.bundleId,
+    sellerShippingFeePay: order?.seller_shipping_fee_pay,
+    carrierAccount: order?.carrierAccount,
+    carrier: order?.carrier,
+    rateId: order?.rate_id,
+  });
+  let {
+    carrierAccount,
+    amount,
+    totalWeightOz,
+    bundleId,
+    seller_shipping_fee_pay,
+    provider: carrier,
+    rate_id
+  } = normalizedShipping;
+
+  // Application-level replay protection. The database-level unique constraint
+  // is intentionally deferred to the audited migration, so a simultaneous
+  // first-time race is still reported as a remaining risk.
+  if (paymentIntentId) {
+    const existingEarningsTransaction = await transactionModel.findOne({
+      paymentIntentId,
+      type: "order",
+      to: order.seller,
+    });
+    if (existingEarningsTransaction) {
+      const [originalOrder, originalItem] = await Promise.all([
+        orderModel.findById(existingEarningsTransaction.orderId),
+        itemModel.findById(existingEarningsTransaction.itemId),
+      ]);
+      return {
+        success: true,
+        orderId: originalOrder?._id || order._id,
+        message: "Order completed",
+        newOrder: originalOrder || order,
+        newItem: originalItem || item,
+        seller: (originalOrder || order).seller,
+        buyer: (originalOrder || order).customer,
+        productres,
+        idempotentReplay: true,
+      };
+    }
+  }
+
+  const sellerWalletQuery = {
+    _id: order.seller,
+    $or: [
+      { walletPending: { $type: "number" } },
+      { walletPending: { $exists: false } },
+    ],
+  };
+  const sellerWalletReady = await userModel.exists(sellerWalletQuery);
+  if (!sellerWalletReady) {
+    const sellerExists = await userModel.exists({ _id: order.seller });
+    const error = new Error(
+      sellerExists
+        ? "Seller walletPending must be numeric"
+        : "Seller not found while recording payment"
+    );
+    error.code = sellerExists
+      ? "INVALID_WALLET_PENDING"
+      : "SELLER_NOT_FOUND_DURING_PAYMENT_RECORDING";
+    throw error;
+  }
+
   // ---------- INVENTORY ----------
-  await productModel.findByIdAndUpdate(
-    productres._id,
+  const updatedProduct = await productModel.findOneAndUpdate(
+    { _id: productres._id, quantity: { $gte: item.quantity } },
     {
       $inc: {
         quantity: -item.quantity,
         salesCount: item.quantity,
         order_reference_counter: 1
       }
-    }
+    },
+    { new: true }
   );
+  if (!updatedProduct) {
+    const error = new Error("Product inventory is no longer available");
+    error.code = "INSUFFICIENT_INVENTORY_DURING_FINALIZATION";
+    throw error;
+  }
 
   // ---------- FLASH SALE ----------
   if (productres?.flash_sale && productres?.quantity === 0) {
@@ -889,19 +1576,23 @@ async function finalizeOrder({
   );
 
   // ---------- SELLER WALLET ----------
-  let seller = await userModel.findByIdAndUpdate(order.seller, {
-    $inc: { walletPending: earnings }
-  }, { new: true });
-  console.log("shipping ", shipping)
-  let {
-    carrierAccount,
-    amount,
-    totalWeightOz,
-    bundleId,
-    seller_shipping_fee_pay,
-    provider: carrier,
-    rate_id
-  } = shipping;
+  let seller = await userModel.findOneAndUpdate(
+    sellerWalletQuery,
+    { $inc: { walletPending: validatedEarnings } },
+    { new: true }
+  );
+  if (!seller) {
+    const sellerExists = await userModel.exists({ _id: order.seller });
+    const error = new Error(
+      sellerExists
+        ? "Seller walletPending must be numeric"
+        : "Seller not found while recording payment"
+    );
+    error.code = sellerExists
+      ? "INVALID_WALLET_PENDING"
+      : "SELLER_NOT_FOUND_DURING_PAYMENT_RECORDING";
+    throw error;
+  }
 
   if (retry == true) {
     let newOrder = await orderModel.findOne({
@@ -953,9 +1644,11 @@ async function finalizeOrder({
     from: order.customer,
     to: order.seller,
     chargeId: charge?.id,
+    paymentIntentId,
+    paymentAttemptId,
     balanceTransactionId: charge?.balance_transaction?.id,
     availableOn: balanceTx?.available_on ? balanceTx.available_on * 1000 : Date.now(),
-    amount: earnings,
+    amount: validatedEarnings,
     total: subtotal,
     shippingFee: amount,
     serviceFee,
@@ -971,6 +1664,42 @@ async function finalizeOrder({
     new_pending_balance: seller?.walletPending
   });
 
+  if (Number(amount) > 0) {
+    await transactionModel.create({
+      reason: `Buyer Shipping cost from order #${order._id}`,
+      amount: Number(amount),
+      status: "Pending",
+      type: "shipping_deduction",
+      deducting: true,
+      orderId: order._id,
+      paymentIntentId,
+      paymentAttemptId,
+      date: Date.now(),
+      availableOn: balanceTx?.available_on
+        ? balanceTx.available_on * 1000
+        : Date.now(),
+    });
+  }
+
+  if (Number(order?.discount) > 0) {
+    await referralLogModel.updateOne(
+      { referredUserId: order.customer, rewardedAt: null },
+      { $set: { rewardedAt: new Date() } }
+    );
+    await transactionModel.create({
+      from: order.seller,
+      to: order.customer,
+      amount: Number(order.discount),
+      status: "Completed",
+      type: "referral_credit",
+      reason: `Referral discount from order #${order._id}`,
+      paymentIntentId,
+      paymentAttemptId,
+      date: Date.now(),
+      deducting: true,
+    });
+  }
+
   saveLogs({
     user: order.seller,
     log_data: JSON.stringify({
@@ -978,7 +1707,8 @@ async function finalizeOrder({
       orderId: order._id,
       itemId: item._id,
       chargeId: charge?.id,
-      amount: earnings,
+      paymentIntentId,
+      amount: validatedEarnings,
       total: subtotal,
       shippingFee: amount,
       serviceFee: serviceFee,
@@ -994,6 +1724,8 @@ async function finalizeOrder({
   await transactionModel.create({
     reason: `System Service Fee from order${order?.invoice}`,
     amount: parseFloat(serviceFee),
+    paymentIntentId,
+    paymentAttemptId,
     status: "Pending",
     type: "service_fee",
     deducting: true,
@@ -1032,7 +1764,8 @@ async function chargeStripePaymentMethod(
   shippingFee,
   tax,
   referralDiscount,
-  buyer
+  buyer,
+  idempotencyKey
 ) {
   let sellerdata = await userModel.findById(seller)
   let referralClaimed = false;
@@ -1099,42 +1832,40 @@ async function chargeStripePaymentMethod(
       off_session: true,
       confirm: true,
       transfer_group: `order_${orderId}`,
-      metadata: { sellerId: sellerdata?._id.toString(), orderId: orderId?.toString() },
+      metadata: {
+        sellerId: sellerdata?._id.toString(),
+        orderId: orderId?.toString(),
+        ...(idempotencyKey ? { paymentAttemptId: idempotencyKey } : {}),
+      },
       on_behalf_of: sellerdata?.stripe_account,
     }
-    const paymentIntent = await stripe.paymentIntents.create(payload);
-    await new Promise((r) => setTimeout(r, 5000));
+    const paymentIntent = idempotencyKey
+      ? await stripe.paymentIntents.create(payload, { idempotencyKey })
+      : await stripe.paymentIntents.create(payload);
     const refreshedPI = await stripe.paymentIntents.retrieve(paymentIntent.id, {
       expand: ["latest_charge.balance_transaction"],
     });
-    if (shippingFee > 0) {
-      await transactionModel.create({
-        reason: `Buyer Shipping cost from order #${orderId}`,
-        amount: parseFloat(shippingFee),
-        status: "Pending",
-        type: "shipping_deduction",
-        deducting: true,
-        orderId: orderId,
-        date: Date.now(),
-        availableOn: refreshedPI?.latest_charge?.balance_transaction?.available_on ? refreshedPI.latest_charge.balance_transaction.available_on * 1000 : Date.now()
+    if (idempotencyKey) {
+      await paymentAttemptModel.updateOne(
+        { _id: idempotencyKey },
+        {
+          $set: {
+            paymentIntentId: refreshedPI.id,
+            stripeStatus: refreshedPI.status,
+            recordingStatus: refreshedPI.status === "succeeded"
+              ? "stripe_succeeded"
+              : "stripe_incomplete",
+            lastErrorCode: null,
+          },
+        }
+      ).catch((attemptError) => {
+        console.error("Unable to update payment attempt after Stripe response", {
+          code: attemptError.code || null,
+          orderId: orderId?.toString?.(),
+        });
       });
     }
-    if (referralDiscountCents > 0 && paymentmethod?.userid) {
-      await referralLogModel.updateOne(
-        { referredUserId: paymentmethod.userid, rewardedAt: null },
-        { $set: { rewardedAt: new Date() } }
-      );
-      await transactionModel.create({
-        from: seller,
-        to: paymentmethod?.userid,
-        amount: referralDiscountCents / 100,
-        status: "Completed",
-        type: "referral_credit",
-        reason: `Referral discount from order #${orderId}`,
-        date: Date.now(),
-        deducting: true
-      })
-    }
+    assertSucceededPaymentIntent(refreshedPI);
     return {
       paymentIntent: refreshedPI,
       charge: refreshedPI.latest_charge,
@@ -1152,6 +1883,7 @@ async function chargeStripePaymentMethod(
     const rawPaymentIntent = err.raw?.payment_intent;
     const lastPaymentError = rawPaymentIntent?.last_payment_error;
     const paymentIntentId =
+      err.paymentIntentId ||
       err.payment_intent?.id ||
       rawPaymentIntent?.id ||
       (typeof rawPaymentIntent === "string" ? rawPaymentIntent : null) ||
@@ -1168,6 +1900,19 @@ async function chargeStripePaymentMethod(
       err.raw?.decline_code ||
       lastPaymentError?.decline_code ||
       null;
+    if (idempotencyKey) {
+      await paymentAttemptModel.updateOne(
+        { _id: idempotencyKey },
+        {
+          $set: {
+            paymentIntentId,
+            stripeStatus: err.paymentIntentStatus || rawPaymentIntent?.status || null,
+            recordingStatus: "stripe_incomplete",
+            lastErrorCode: errorCode,
+          },
+        }
+      ).catch(() => {});
+    }
     console.error("Stripe original error:", err);
     console.error("Stripe payment failed", {
       message: err.message,
@@ -1177,8 +1922,7 @@ async function chargeStripePaymentMethod(
       decline_code: declineCode,
       providerMessage,
       paymentIntentId,
-      requestId: err.requestId || err.raw?.requestId,
-      providerResponse: err.raw
+      requestId: err.requestId || err.raw?.requestId
     });
     let response = {
       paymentIntent: paymentIntentId,
@@ -1193,7 +1937,9 @@ async function chargeStripePaymentMethod(
         type: errorType,
         decline_code: declineCode,
         paymentIntentId,
-        requestId: err.requestId || (err.raw && err.raw.requestId)
+        requestId: err.requestId || (err.raw && err.raw.requestId),
+        paymentIntentStatus: err.paymentIntentStatus || rawPaymentIntent?.status || null,
+        retryPayment: err.retryPayment
       },
       success: false
     };
@@ -2092,7 +2838,8 @@ const createAuctionCharge = async (auction) => {
       videoReceipt: aucres?.videoReceipt || auction?.videoReceipt || "",
       carrier,
       shipping: shipping_response,
-      allow_referal_discount
+      allow_referal_discount,
+      checkoutAttemptId: `auction:${auction._id}:${highestBidder._id}:${highestBid}`
     });
   } catch (err) {
     console.error("Auction order payment setup failed", {
@@ -3016,6 +3763,7 @@ module.exports = {
   getOrderPopulates,
   saveLogs,
   retryOrderPayment,
+  finalizeOrder,
   attachVideoReceiptsToItems,
   attachVideoReceiptsToOrders,
   syncAuctionVideoReceiptToItems

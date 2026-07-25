@@ -15,6 +15,12 @@ const transaction = new Schema(
     chargeId: {
       type: String,
     },
+    paymentIntentId: {
+      type: String,
+    },
+    paymentAttemptId: {
+      type: String,
+    },
     transferId: {
       type: String,
     },

@@ -36,6 +36,12 @@ const orderItems = Schema(
     chargeId: {
       type: String,
     },
+    paymentIntentId: {
+      type: String,
+    },
+    paymentAttemptId: {
+      type: String,
+    },
     status: {
       type: String,
       default: "processing",
