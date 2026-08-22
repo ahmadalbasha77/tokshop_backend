@@ -78,7 +78,8 @@ router.get(
   requireAdminJson,
   paymentReconciliationController.getPaymentReconciliationReport
 );
-router.get("/users", requireAdminJson, adminReadController.getUsers);
+// Admin user list (full fields). Mobile search uses JWT GET /users → userController.getUsers
+router.get("/admin/users", requireAdminJson, adminReadController.getUsers);
 router.get(
   "/users/stats/all",
   requireAdminJson,

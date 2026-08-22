@@ -633,30 +633,42 @@ exports.deletePaymentmethod = async (req, res, next) => {
 
 exports.getUsers = async (req, res, next) => {
   const { title, page, limit, currentUserId, status, type } = req.query;
+  const isAdmin =
+    req.user?._authType === "admin" || req.user?.role === "admin";
 
   const queryObject = {};
 
   if (title) {
-    queryObject.$or = [{ userName: { $regex: `${title}`, $options: "i" } }, { firstName: { $regex: `${title}`, $options: "i" } }, { lastName: { $regex: `${title}`, $options: "i" } }, { email: { $regex: `${title}`, $options: "i" } }];
+    const searchFields = isAdmin
+      ? ["userName", "firstName", "lastName", "email"]
+      : ["userName", "firstName", "lastName"];
+    queryObject.$or = searchFields.map((field) => ({
+      [field]: { $regex: String(title), $options: "i" },
+    }));
   }
-  if (status == "pending") {
-    const titleOr = queryObject.$or;
-    const pendingOr = [
-      { "seller_application.status": "pending" },
-      { "seller_application.status": { $exists: false } },
-    ];
-    queryObject.applied_seller = true;
-    queryObject.seller = false;
-    if (titleOr) {
-      delete queryObject.$or;
-      queryObject.$and = [{ $or: titleOr }, { $or: pendingOr }];
-    } else {
-      queryObject.$or = pendingOr;
+
+  // Admin-only filters (seller approval queue, suspended accounts)
+  if (isAdmin) {
+    if (status == "pending") {
+      const titleOr = queryObject.$or;
+      const pendingOr = [
+        { "seller_application.status": "pending" },
+        { "seller_application.status": { $exists: false } },
+      ];
+      queryObject.applied_seller = true;
+      queryObject.seller = false;
+      if (titleOr) {
+        delete queryObject.$or;
+        queryObject.$and = [{ $or: titleOr }, { $or: pendingOr }];
+      } else {
+        queryObject.$or = pendingOr;
+      }
+    }
+    if (status == "suspended") {
+      queryObject.suspended = true;
     }
   }
-  if (status == "suspended") {
-    queryObject.suspended = true;
-  }
+
   if (type == "seller") {
     queryObject.seller = true;
   }
@@ -669,38 +681,48 @@ exports.getUsers = async (req, res, next) => {
   const skip = (pages - 1) * limits;
 
   try {
-    const blockedOwners = await userModel
-      .find({ blocked: currentUserId })
-      .select("_id");
-    const blockedOwnerIds = blockedOwners.map(u => u._id);
+    if (currentUserId) {
+      const blockedOwners = await userModel
+        .find({ blocked: currentUserId })
+        .select("_id");
+      const blockedOwnerIds = blockedOwners.map((u) => u._id);
 
-    if (blockedOwnerIds.length > 0) {
-      queryObject._id = { $nin: blockedOwnerIds };
+      if (blockedOwnerIds.length > 0) {
+        queryObject._id = { $nin: blockedOwnerIds };
+      }
     }
 
     const totalDoc = await userModel.countDocuments(queryObject);
-    const users = await userModel
-      .find(queryObject)
-      .skip(skip)
-      .populate("following", [
-        "firstName",
-        "lastName",
-        "bio",
-        "userName",
-        "email",
-        "accountDisabled",
-      ])
-      .populate("followers", [
-        "firstName",
-        "lastName",
-        "bio",
-        "userName",
-        "email",
-        "accountDisabled",
-      ])
-      .populate("shipping")
-      .sort("-_id")
-      .limit(limits);
+
+    let usersQuery = userModel.find(queryObject).skip(skip).sort("-_id").limit(limits);
+
+    if (isAdmin) {
+      usersQuery = usersQuery
+        .populate("following", [
+          "firstName",
+          "lastName",
+          "bio",
+          "userName",
+          "email",
+          "accountDisabled",
+        ])
+        .populate("followers", [
+          "firstName",
+          "lastName",
+          "bio",
+          "userName",
+          "email",
+          "accountDisabled",
+        ])
+        .populate("shipping");
+    } else {
+      // Public search: safe fields only (no email, followers, shipping, etc.)
+      usersQuery = usersQuery.select(
+        "userName firstName lastName profilePhoto bio seller createdAt"
+      );
+    }
+
+    const users = await usersQuery;
 
     res.send({
       users,
